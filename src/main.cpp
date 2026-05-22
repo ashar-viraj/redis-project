@@ -25,7 +25,7 @@ void recieve_msg(int client_fd) {
   if(msg_len > 0)
   {
     if(strcmp(buffer, "PING")) {
-      strcpy(buffer, "PONG");
+      strcpy(buffer, "+PONG\r\n");
       send_msg(client_fd);
     }
   }
@@ -77,6 +77,8 @@ int main(int argc, char **argv) {
   // 
   int client_fd = accept(server_fd, (struct sockaddr *) &client_addr, (socklen_t *) &client_addr_len);
   std::cout << "Client connected\n";
+
+  recieve_msg();
   
   close(server_fd);
 
