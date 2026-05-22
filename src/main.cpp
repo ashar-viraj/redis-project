@@ -78,7 +78,7 @@ int main(int argc, char **argv) {
   int client_fd = accept(server_fd, (struct sockaddr *) &client_addr, (socklen_t *) &client_addr_len);
   std::cout << "Client connected\n";
 
-  recieve_msg();
+  recieve_msg(client_fd);
   
   close(server_fd);
 
