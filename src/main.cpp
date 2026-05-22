@@ -21,12 +21,17 @@ void send_msg(int client_fd) {
 }
 
 void recieve_msg(int client_fd) {
-  int msg_len = recv(client_fd, buffer, sizeof(buffer), 0);
-  if(msg_len > 0)
-  {
-    if(strcmp(buffer, "PING")) {
-      strcpy(buffer, "+PONG\r\n");
-      send_msg(client_fd);
+  while(true) {
+    memset(buffer, 0, sizeof(buffer));
+
+    int msg_len = recv(client_fd, buffer, sizeof(buffer)-1, 0);
+    if(msg_len > 0)
+    {
+      buffer[msg_len] = '\0';
+      if(strcmp(buffer, "PING")) {
+        strcpy(buffer, "+PONG\r\n");
+        send_msg(client_fd);
+      }
     }
   }
 }
