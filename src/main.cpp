@@ -8,6 +8,29 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 
+using namespace std;
+
+char buffer[1024] = {0};
+
+void send_msg(int client_fd) {
+  int byte_sent = send(client_fd, buffer, strlen(buffer), 0);
+
+  if(byte_sent == -1) {
+    cout << "Error sending the msg.\n";
+  }
+}
+
+void recieve_msg(int client_fd) {
+  int msg_len = recv(client_fd, buffer, sizeof(buffer), 0);
+  if(msg_len > 0)
+  {
+    if(strcmp(buffer, "PING")) {
+      strcpy(buffer, "PONG");
+      send_msg(client_fd);
+    }
+  }
+}
+
 int main(int argc, char **argv) {
   // Flush after every std::cout / std::cerr
   std::cout << std::unitbuf;
@@ -52,7 +75,7 @@ int main(int argc, char **argv) {
 
   // Uncomment the code below to pass the first stage
   // 
-  accept(server_fd, (struct sockaddr *) &client_addr, (socklen_t *) &client_addr_len);
+  int client_fd = accept(server_fd, (struct sockaddr *) &client_addr, (socklen_t *) &client_addr_len);
   std::cout << "Client connected\n";
   
   close(server_fd);
