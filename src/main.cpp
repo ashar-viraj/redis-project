@@ -7,33 +7,56 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <thread>
+#include <vector>
+
+#include "resp_parser.h"
+#include "request_handler.h"
+#include "resp_serializer.h"
 
 using namespace std;
 
-char buffer[1024] = {0};
+#define MAX_BUFFER_LEN 1024
 
-void send_msg(int client_fd) {
+void send_msg(char buffer[], int client_fd) {
   int byte_sent = send(client_fd, buffer, strlen(buffer), 0);
-
+  
   if(byte_sent == -1) {
     cout << "Error sending the msg.\n";
   }
 }
 
 void recieve_msg(int client_fd) {
+  char buffer[MAX_BUFFER_LEN] = {0};
+  const char *pong = "+PONG\r\n";
   while(true) {
     memset(buffer, 0, sizeof(buffer));
 
     int msg_len = recv(client_fd, buffer, sizeof(buffer)-1, 0);
-    if(msg_len > 0)
-    {
-      buffer[msg_len] = '\0';
-      if(strcmp(buffer, "PING")) {
-        strcpy(buffer, "+PONG\r\n");
-        send_msg(client_fd);
-      }
-    }
+    if(msg_len <= 0)
+      break;
+    // cout << "msg len : " << msg_len << (int)buffer[msg_len] << endl;
+    buffer[msg_len] = '\0';
+
+    RESPParser parser;
+    RequestHandler handler;
+    RESPSerializer serializer;
+
+    RESPValue req = parser.parse(buffer);
+
+    RESPValue res = handler.handle(req);
+
+    string resStr = serializer.serialize(res);
+    
+    memset(buffer, 0, sizeof(buffer));
+    for(int i = 0; i < resStr.size(); i++)
+      buffer[i] = resStr[i];
+    buffer[resStr.size()] = '\0';
+
+    send_msg(buffer, client_fd);
   }
+
+  close(client_fd);
 }
 
 int main(int argc, char **argv) {
@@ -79,12 +102,17 @@ int main(int argc, char **argv) {
   std::cout << "Logs from your program will appear here!\n";
 
   // Uncomment the code below to pass the first stage
-  // 
-  int client_fd = accept(server_fd, (struct sockaddr *) &client_addr, (socklen_t *) &client_addr_len);
-  std::cout << "Client connected\n";
-
-  recieve_msg(client_fd);
+  while(true) {
+    int client_fd = accept(server_fd, (struct sockaddr *) &client_addr, (socklen_t *) &client_addr_len);
+    if(client_fd < 0) {
+      cout << "Client connection failed.\n";
+      continue;
+    }
+    std::cout << "Client connected\n";
+    thread(recieve_msg, client_fd).detach();
   
+    // recieve_msg(client_fd);
+  }
   close(server_fd);
 
   return 0;
