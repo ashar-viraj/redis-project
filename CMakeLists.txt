@@ -14,3 +14,6 @@ add_executable(redis ${SOURCE_FILES})
 
 target_link_libraries(redis PRIVATE asio asio::asio)
 target_link_libraries(redis PRIVATE Threads::Threads)
+
+add_executable(redis-client client/client.cpp)
+target_link_libraries(redis-client PRIVATE Threads::Threads)

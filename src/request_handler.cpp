@@ -52,13 +52,28 @@ RESPValue RequestHandler::handleEcho(const RESPArray &arr) {
 }
 
 RESPValue RequestHandler::handleSet(const RESPArray &arr) {
-    if(arr.size() != 3) 
+    if(arr.size() != 3 && arr.size() != 5) {
+        cout << "arr size: " << arr.size() << endl;
         return {"ERR wrong number of arguments.", '-'};
+    }
+
+    optional<long long> px;
 
     string key = get<string>(arr[1].value);
     string value = get<string>(arr[2].value);
 
-    store.set(key, value);
+    if(arr.size() == 5) {
+        string option = get<string>(arr[3].value);
+        for(auto &e : option) e = toupper(e);
+        if(option == "PX")
+            px = stoll(get<string>(arr[4].value));
+        else if(option == "EX")
+            px = stoll(get<string>(arr[4].value)) * 1000;
+        else
+            return {"ERR Unsupported option.", '-'};
+    }
+
+    store.set(key, value, px);
 
     return {"OK", '+'};
 }
