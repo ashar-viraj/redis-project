@@ -18,7 +18,8 @@ string RESPSerializer::serialize(const RESPValue &value)
         return integer(get<long long>(value.value));
 
     case '$':
-        return bulkString(get<string>(value.value));
+        return bulkString(value);
+        // return bulkString(get<string>(value.value));
 
     case '*':
         return array(get<RESPArray>(value.value));
@@ -26,7 +27,6 @@ string RESPSerializer::serialize(const RESPValue &value)
     default:
         throw runtime_error("Unknown type in Serializing.");
     }
-
 }
 
 string RESPSerializer::simpleString(const string &str)
@@ -44,8 +44,13 @@ string RESPSerializer::integer(long long num)
     return ":" + to_string(num) + "\r\n";
 }
 
-string RESPSerializer::bulkString(const string &str)
+string RESPSerializer::bulkString(const RESPValue &value)
 {
+    if(holds_alternative<nullptr_t>(value.value))
+        return "$-1\r\n";
+
+    string str = get<string>(value.value);
+
     return "$" + to_string(str.size()) + "\r\n" + str + "\r\n";
 }
 

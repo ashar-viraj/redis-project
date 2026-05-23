@@ -10,9 +10,9 @@
 #include <thread>
 #include <vector>
 
-#include "resp_parser.h"
+#include "RESP/resp_parser.h"
 #include "request_handler.h"
-#include "resp_serializer.h"
+#include "RESP/resp_serializer.h"
 
 using namespace std;
 
@@ -26,7 +26,11 @@ void send_msg(char buffer[], int client_fd) {
   }
 }
 
-void recieve_msg(int client_fd) {
+void recieve_msg(int client_fd, 
+  RESPParser &parser, 
+  RequestHandler &handler,
+  RESPSerializer &serializer
+) {
   char buffer[MAX_BUFFER_LEN] = {0};
   const char *pong = "+PONG\r\n";
   while(true) {
@@ -37,10 +41,6 @@ void recieve_msg(int client_fd) {
       break;
     // cout << "msg len : " << msg_len << (int)buffer[msg_len] << endl;
     buffer[msg_len] = '\0';
-
-    RESPParser parser;
-    RequestHandler handler;
-    RESPSerializer serializer;
 
     RESPValue req = parser.parse(buffer);
 
@@ -102,6 +102,13 @@ int main(int argc, char **argv) {
   std::cout << "Logs from your program will appear here!\n";
 
   // Uncomment the code below to pass the first stage
+
+  Store store;
+
+  RESPParser parser;
+  RequestHandler handler(store);
+  RESPSerializer serializer;
+
   while(true) {
     int client_fd = accept(server_fd, (struct sockaddr *) &client_addr, (socklen_t *) &client_addr_len);
     if(client_fd < 0) {
@@ -109,7 +116,7 @@ int main(int argc, char **argv) {
       continue;
     }
     std::cout << "Client connected\n";
-    thread(recieve_msg, client_fd).detach();
+    thread(recieve_msg, client_fd, ref(parser), ref(handler), ref(serializer)).detach();
   
     // recieve_msg(client_fd);
   }

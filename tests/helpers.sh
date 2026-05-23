@@ -14,21 +14,36 @@ pass() { echo -e "${GREEN}[PASS]${NC} $1"; }
 fail() { echo -e "${RED}[FAIL]${NC} $1"; }
 info() { echo -e "${YELLOW}[INFO]${NC} $1"; }
 
+# Set EXTERNAL_SERVER=1 to skip build+start (use when running server under a debugger manually)
+
 build_server() {
+    [ "${EXTERNAL_SERVER:-0}" = "1" ] && { info "EXTERNAL_SERVER=1 — skipping build"; return; }
     info "Building..."
-    cmake -B "$REPO_ROOT/build" -S "$REPO_ROOT" \
+    local cmake_log
+    cmake_log=$(cmake -B "$REPO_ROOT/build" -S "$REPO_ROOT" \
         -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" \
-        -DCMAKE_BUILD_TYPE=Debug \
-        > /dev/null 2>&1
-    cmake --build "$REPO_ROOT/build" > /dev/null 2>&1
+        -DCMAKE_BUILD_TYPE=Debug 2>&1)
     if [ $? -ne 0 ]; then
-        fail "Build failed"
+        fail "CMake configure failed:"
+        echo "$cmake_log"
+        exit 1
+    fi
+
+    local build_log
+    build_log=$(cmake --build "$REPO_ROOT/build" 2>&1)
+    if [ $? -ne 0 ]; then
+        fail "Build failed:"
+        echo "$build_log"
         exit 1
     fi
     info "Build OK"
 }
 
 start_server() {
+    if [ "${EXTERNAL_SERVER:-0}" = "1" ]; then
+        info "EXTERNAL_SERVER=1 — assuming server is already running on port 6379"
+        return
+    fi
     # Kill any leftover process on 6379
     fuser -k 6379/tcp > /dev/null 2>&1 || true
     sleep 0.2
@@ -47,6 +62,7 @@ start_server() {
 }
 
 stop_server() {
+    [ "${EXTERNAL_SERVER:-0}" = "1" ] && return   # don't kill a server we didn't start
     if [ -n "$TAIL_PID" ]; then
         kill "$TAIL_PID" 2>/dev/null
         TAIL_PID=""

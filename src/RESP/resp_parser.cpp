@@ -19,7 +19,6 @@ RESPValue RESPParser::parse(char buffer[])
 {
     int idx = 0;
     string bufferStr = arrayToString(buffer);
-    // cout << "bufferStr: " << bufferStr << endl;
     return parseValue(bufferStr, idx);
 }
 
@@ -87,18 +86,16 @@ RESPValue RESPParser::parseInteger(const string &buffer, int &idx)
 RESPValue RESPParser::parseBulkString(const string &buffer, int &idx)
 {
     idx++;
-    
+
     int strLen = stoi(readLine(buffer, idx));
-    
+
     string str = buffer.substr(idx, strLen);
-    
+
     idx += strLen;
-    
-    if(buffer[idx] != '\r' || buffer[idx+1] != '\n') {
-        // cout << "RE MBS: " << (buffer[idx] != '\r') << ' ' << (buffer[idx+1] != '\n') << (int)buffer[idx+1] << endl;
+
+    if (buffer[idx] != '\r' || buffer[idx + 1] != '\n')
         throw runtime_error("Malformed bulk string");
-    }
-        
+
     idx += 2;
 
     return {str, '$'};
@@ -111,12 +108,8 @@ RESPValue RESPParser::parseArray(const string &buffer, int &idx)
     int arraySize = stoi(readLine(buffer, idx));
     RESPArray array;
 
-    // cout << "array size: " << arraySize << endl;
-    
-    for (int i = 0; i < arraySize; i++) {
-        // cout << "Parsing array " << idx << ' ' << buffer[idx] << endl;
+    for (int i = 0; i < arraySize; i++)
         array.push_back(parseValue(buffer, idx));
-    }
 
     return {array, '*'};
 }

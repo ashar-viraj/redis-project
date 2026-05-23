@@ -11,7 +11,7 @@ using RESPArray = vector<RESPValue>;
 
 struct RESPValue
 {
-    variant<string, long long, RESPArray> value;
+    variant<string, long long, RESPArray, nullptr_t> value;
     char type;
 };
 

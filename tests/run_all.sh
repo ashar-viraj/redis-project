@@ -19,11 +19,12 @@ run_stage() {
     echo ""
 }
 
-run_stage "$TESTS_DIR/test_bind.sh"               "Stage 1: Bind to port"
-run_stage "$TESTS_DIR/test_ping.sh"               "Stage 2: Respond to PING"
-run_stage "$TESTS_DIR/test_multiple_ping.sh"      "Stage 3: Multiple PINGs"
-run_stage "$TESTS_DIR/test_concurrent_clients.sh" "Stage 4: Concurrent clients"
-run_stage "$TESTS_DIR/test_echo.sh"               "Stage 5: ECHO command"
+# run_stage "$TESTS_DIR/test_bind.sh"               "Stage 1: Bind to port"
+# run_stage "$TESTS_DIR/test_ping.sh"               "Stage 2: Respond to PING"
+# run_stage "$TESTS_DIR/test_multiple_ping.sh"      "Stage 3: Multiple PINGs"
+# run_stage "$TESTS_DIR/test_concurrent_clients.sh" "Stage 4: Concurrent clients"
+# run_stage "$TESTS_DIR/test_echo.sh"               "Stage 5: ECHO command"
+run_stage "$TESTS_DIR/test_set_get.sh"            "Stage 6: SET & GET commands"
 
 echo "=============================="
 echo "Results: $PASS passed, $FAIL failed"

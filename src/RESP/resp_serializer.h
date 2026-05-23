@@ -10,6 +10,6 @@ private:
     string simpleString(const string &str);
     string error(const string &str);
     string integer(long long num);
-    string bulkString(const string &str);
+    string bulkString(const RESPValue &value);
     string array(const RESPArray &arr);
 };
