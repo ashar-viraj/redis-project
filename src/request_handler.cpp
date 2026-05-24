@@ -39,6 +39,10 @@ RESPValue RequestHandler::handle(const RESPValue &req) {
     if(cmd == "RPUSH")
         return handleRpush(arr);
 
+    if(cmd == "LPUSH")
+        return handleLpush(arr);
+        
+
     if(cmd == "LRANGE")
         return handleLrange(arr);
 
@@ -112,6 +116,25 @@ RESPValue RequestHandler::handleRpush(const RESPArray &arr) {
 
     return {size, ':'};
 }
+
+RESPValue RequestHandler::handleLpush(const RESPArray &arr) {
+    if(arr.size() < 3)
+        return {"ERR wrong number of arguments.", '-'};
+
+    long long size;
+    const string key = get<string>(arr[1].value);
+
+    for(int i = 2; i < arr.size(); i++) {
+        const string value = get<string>(arr[i].value);
+        size = store.lpush(key, value);
+
+        if(size == -1)
+            return {"WRONGTYPE Operation against a key holding the wrong kind of value", '-'};
+    }
+
+    return {size, ':'};
+}
+
 
 RESPValue RequestHandler::handleLrange(const RESPArray &arr) {
     if(arr.size() != 4)

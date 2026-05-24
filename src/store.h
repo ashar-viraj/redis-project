@@ -9,14 +9,12 @@
 
 using namespace std;
 
-using ListType = map<int, string>;
+using ListType = deque<string>;
 using RedisData = variant<string, ListType>;
 
 struct ValueEntry{
     RedisData value;
-    // IMPORTANT
     optional<chrono::steady_clock::time_point> expiry;
-    optional<int> start, end;
 };
 
 class Store{

@@ -27,7 +27,10 @@ optional<string> Store::get(const string &key) {
         return nullopt;
     }
 
-    return std::get<string>(kv[key].value);
+    auto* str = get_if<string>(&kv[key].value);
+    if(!str)
+        return nullopt;
+    return *str;
 }
 
 long long Store::rpush(const string &key, const string &value) {
@@ -35,23 +38,34 @@ long long Store::rpush(const string &key, const string &value) {
 
     if(itr == kv.end()) {
         ValueEntry entry;
-        entry.start = 0, entry.end = 0;
-        entry.value = ListType{{0, value}};
-
+        entry.value = ListType{value};
         kv[key] = move(entry);
-
         return 1;
     }
 
-    // IMPORTANT
-    auto *list = get_if<ListType>(&((itr->second).value));
-
+    auto *list = get_if<ListType>(&(itr->second.value));
     if(!list)
         return -1;
 
-    (*itr->second.end)++;
-    (*list)[*itr->second.end] = value;
+    list->push_back(value);
+    return list->size();
+}
 
+long long Store::lpush(const string &key, const string &value) {
+    auto itr = kv.find(key);
+
+    if(itr == kv.end()) {
+        ValueEntry entry;
+        entry.value = ListType{value};
+        kv[key] = move(entry);
+        return 1;
+    }
+
+    auto *list = get_if<ListType>(&(itr->second.value));
+    if(!list)
+        return -1;
+
+    list->push_front(value);
     return list->size();
 }
 
@@ -59,33 +73,21 @@ optional<vector<string>> Store::lrange(const string &key, int left, int right) {
     auto itr = kv.find(key);
 
     optional<vector<string>> values = vector<string>{};
-    
-    if(itr == kv.end()) 
+
+    if(itr == kv.end())
         return values;
 
     auto *list = get_if<ListType>(&(itr->second.value));
-
     if(!list)
         return nullopt;
 
-    int startIdx = *itr->second.start;
-    int endIdx = *itr->second.end;
-    
-    int listSize = list->size();
+    int size = (int)list->size();
 
-    left += startIdx;
-    right += startIdx;
+    if(right < 0) right = size + right;
+    if(left < 0)  left  = size + left;
 
-    if(right < 0)
-        right = listSize + right;
-    if(left < 0)
-        left = listSize + left;
+    for(int i = max(0, left); i <= min(size - 1, right); i++)
+        values->push_back((*list)[i]);
 
-    std::cout << left << ' ' << right << ' ' << startIdx << ' ' << endIdx << endl;
-    
-
-    for(int i = max(startIdx, left); i <= min(endIdx, right); i++)
-        (*values).push_back((*list)[i]);
-        
     return values;
 }
