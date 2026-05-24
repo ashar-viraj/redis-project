@@ -16,4 +16,5 @@ private:
     RESPValue handleSet(const RESPArray &arr);
     RESPValue handleGet(const RESPArray &arr);
     RESPValue handleRpush(const RESPArray &arr);
+    RESPValue handleLrange(const RESPArray &arr);
 };

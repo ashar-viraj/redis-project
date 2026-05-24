@@ -27,6 +27,7 @@ run_stage "$TESTS_DIR/test_echo.sh"               "Stage 5: ECHO command"
 run_stage "$TESTS_DIR/test_set_get.sh"            "Stage 6: SET & GET commands"
 run_stage "$TESTS_DIR/test_expiry.sh"             "Stage 7: Key expiry (PX/EX)"
 run_stage "$TESTS_DIR/test_rpush.sh"              "Stage 8: RPUSH command"
+run_stage "$TESTS_DIR/test_lrange.sh"             "Stage 9/10: LRANGE command"
 
 echo "=============================="
 echo "Results: $PASS passed, $FAIL failed"

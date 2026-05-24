@@ -39,6 +39,9 @@ RESPValue RequestHandler::handle(const RESPValue &req) {
     if(cmd == "RPUSH")
         return handleRpush(arr);
 
+    if(cmd == "LRANGE")
+        return handleLrange(arr);
+
     return {"ERR unkown command", '-'};
 }
 
@@ -50,20 +53,17 @@ RESPValue RequestHandler::handleEcho(const RESPArray &arr) {
     if(arr.size() != 2)
         return {"ERR wrong number of arguements", '-'};
 
-    // cout << "handleEcho for : " << get<string>(arr[1].value) << endl;
     return {get<string>(arr[1].value), '$'};
 }
 
 RESPValue RequestHandler::handleSet(const RESPArray &arr) {
-    if(arr.size() != 3 && arr.size() != 5) {
-        cout << "arr size: " << arr.size() << endl;
+    if(arr.size() != 3 && arr.size() != 5)
         return {"ERR wrong number of arguments.", '-'};
-    }
 
     optional<long long> px;
 
-    string key = get<string>(arr[1].value);
-    string value = get<string>(arr[2].value);
+    const string key = get<string>(arr[1].value);
+    const string value = get<string>(arr[2].value);
 
     if(arr.size() == 5) {
         string option = get<string>(arr[3].value);
@@ -100,10 +100,10 @@ RESPValue RequestHandler::handleRpush(const RESPArray &arr) {
         return {"ERR wrong number of arguments.", '-'};
 
     long long size;
-    string key = get<string>(arr[1].value);
+    const string key = get<string>(arr[1].value);
 
     for(int i = 2; i < arr.size(); i++) {
-        string value = get<string>(arr[i].value);
+        const string value = get<string>(arr[i].value);
         size = store.rpush(key, value);
 
         if(size == -1)
@@ -111,4 +111,29 @@ RESPValue RequestHandler::handleRpush(const RESPArray &arr) {
     }
 
     return {size, ':'};
+}
+
+RESPValue RequestHandler::handleLrange(const RESPArray &arr) {
+    if(arr.size() != 4)
+        return {"ERR wrong number of arguments.", '-'};
+
+    RESPArray result;
+
+    const string key = get<string>(arr[1].value);
+    const int left = stoi(get<string>(arr[2].value));
+    const int right = stoi(get<string>(arr[3].value));
+
+    optional<ListType> values = store.lrange(key, left, right);
+
+    if(!values)
+        return {"WRONGTYPE Operation against a key holding the wrong kind of value", '-'};
+
+    ListType &v = values.value();
+    for(auto &e : v)
+        result.push_back({e, '$'});
+
+    // if(result.size() == 0) 
+    //     return {{}, '*'};
+
+    return {result, '*'};
 }

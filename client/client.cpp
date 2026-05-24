@@ -23,10 +23,32 @@ static std::string encodeRESP(const std::vector<std::string> &tokens)
 static std::vector<std::string> tokenize(const std::string &line)
 {
     std::vector<std::string> tokens;
-    std::istringstream ss(line);
-    std::string tok;
-    while (ss >> tok)
-        tokens.push_back(tok);
+    size_t i = 0;
+    while (i < line.size())
+    {
+        while (i < line.size() && std::isspace(line[i])) ++i;
+        if (i >= line.size()) break;
+
+        if (line[i] == '"')
+        {
+            ++i;
+            std::string tok;
+            while (i < line.size() && line[i] != '"')
+            {
+                if (line[i] == '\\' && i + 1 < line.size()) ++i;
+                tok += line[i++];
+            }
+            if (i < line.size()) ++i; // consume closing "
+            tokens.push_back(tok);
+        }
+        else
+        {
+            std::string tok;
+            while (i < line.size() && !std::isspace(line[i]))
+                tok += line[i++];
+            tokens.push_back(tok);
+        }
+    }
     return tokens;
 }
 
@@ -100,6 +122,7 @@ static bool readResponse(int fd)
             std::cout << "(nil)\n";
             break;
         }
+        if (count == 0) { std::cout << "(empty array)\n"; break; }
         for (int i = 0; i < count; i++)
         {
             std::string elemLine;

@@ -25,4 +25,5 @@ public:
     void set(const string &key, const string &value, optional<long long> px);
     optional<string> get(const string &key);
     long long rpush(const string &key, const string &value);
+    optional<ListType> lrange(const string &key, int left, int right);
 };

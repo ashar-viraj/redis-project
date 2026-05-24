@@ -50,3 +50,28 @@ long long Store::rpush(const string &key, const string &value) {
 
     return list->size();
 }
+
+optional<ListType> Store::lrange(const string &key, int left, int right) {
+    auto itr = kv.find(key);
+
+    ListType values;
+    
+    if(itr == kv.end()) 
+        return values;
+
+    auto *list = get_if<ListType>(&(itr->second.value));
+
+    if(!list)
+        return nullopt;
+
+    int listSize = list->size();
+    if(right < 0)
+        right = listSize + right;
+    if(left < 0)
+        left = listSize + left;
+
+    for(int i = max(0, left); i <= min(right, listSize-1); i++)
+        values.push_back(list->at(i));
+
+    return values;
+}
