@@ -1,6 +1,8 @@
 #include "store.h"
 #include <string>
+#include <vector>
 #include <stdexcept>
+#include <iostream>
 
 void Store::set(const string &key, const string &value, optional<long long> px) {
     ValueEntry entry;
@@ -33,7 +35,8 @@ long long Store::rpush(const string &key, const string &value) {
 
     if(itr == kv.end()) {
         ValueEntry entry;
-        entry.value = ListType{value};
+        entry.start = 0, entry.end = 0;
+        entry.value = ListType{{0, value}};
 
         kv[key] = move(entry);
 
@@ -46,15 +49,16 @@ long long Store::rpush(const string &key, const string &value) {
     if(!list)
         return -1;
 
-    list->push_back(value);
+    (*itr->second.end)++;
+    (*list)[*itr->second.end] = value;
 
     return list->size();
 }
 
-optional<ListType> Store::lrange(const string &key, int left, int right) {
+optional<vector<string>> Store::lrange(const string &key, int left, int right) {
     auto itr = kv.find(key);
 
-    ListType values;
+    optional<vector<string>> values = vector<string>{};
     
     if(itr == kv.end()) 
         return values;
@@ -64,14 +68,24 @@ optional<ListType> Store::lrange(const string &key, int left, int right) {
     if(!list)
         return nullopt;
 
+    int startIdx = *itr->second.start;
+    int endIdx = *itr->second.end;
+    
     int listSize = list->size();
+
+    left += startIdx;
+    right += startIdx;
+
     if(right < 0)
         right = listSize + right;
     if(left < 0)
         left = listSize + left;
 
-    for(int i = max(0, left); i <= min(right, listSize-1); i++)
-        values.push_back(list->at(i));
+    std::cout << left << ' ' << right << ' ' << startIdx << ' ' << endIdx << endl;
+    
 
+    for(int i = max(startIdx, left); i <= min(endIdx, right); i++)
+        (*values).push_back((*list)[i]);
+        
     return values;
 }

@@ -123,17 +123,14 @@ RESPValue RequestHandler::handleLrange(const RESPArray &arr) {
     const int left = stoi(get<string>(arr[2].value));
     const int right = stoi(get<string>(arr[3].value));
 
-    optional<ListType> values = store.lrange(key, left, right);
+    optional<vector<string>> values = store.lrange(key, left, right);
 
     if(!values)
         return {"WRONGTYPE Operation against a key holding the wrong kind of value", '-'};
 
-    ListType &v = values.value();
+    vector<string> &v = values.value();
     for(auto &e : v)
         result.push_back({e, '$'});
-
-    // if(result.size() == 0) 
-    //     return {{}, '*'};
 
     return {result, '*'};
 }
