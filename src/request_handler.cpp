@@ -36,6 +36,9 @@ RESPValue RequestHandler::handle(const RESPValue &req) {
     if(cmd == "GET")
         return handleGet(arr);
 
+    if(cmd == "RPUSH")
+        return handleRpush(arr);
+
     return {"ERR unkown command", '-'};
 }
 
@@ -90,4 +93,22 @@ RESPValue RequestHandler::handleGet(const RESPArray &arr) {
         return {value.value(), '$'};
 
     return {nullptr, '$'};
+}
+
+RESPValue RequestHandler::handleRpush(const RESPArray &arr) {
+    if(arr.size() < 3)
+        return {"ERR wrong number of arguments.", '-'};
+
+    long long size;
+    string key = get<string>(arr[1].value);
+
+    for(int i = 2; i < arr.size(); i++) {
+        string value = get<string>(arr[i].value);
+        size = store.rpush(key, value);
+
+        if(size == -1)
+            return {"WRONGTYPE Operation against a key holding the wrong kind of value", '-'};
+    }
+
+    return {size, ':'};
 }
