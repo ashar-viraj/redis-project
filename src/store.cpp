@@ -91,3 +91,34 @@ optional<vector<string>> Store::lrange(const string &key, int left, int right) {
 
     return values;
 }
+
+long long Store::llen(const string &key) {
+    auto itr = kv.find(key);
+
+    if(itr == kv.end())
+        return 0;
+
+    auto *list = get_if<ListType>(&(itr->second.value));
+
+    if(!list)
+        return -1;
+
+    return list->size();
+}
+
+optional<string> Store::lpop(const string &key) {
+    auto itr = kv.find(key);
+
+    if(itr == kv.end())
+        return nullopt;
+
+    auto *list = get_if<ListType>(&(itr->second.value));
+
+    if(!list || list->empty())
+        return nullopt;
+
+    const string front = list->front();
+    list->pop_front();
+
+    return front;
+}

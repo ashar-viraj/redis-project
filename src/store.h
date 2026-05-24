@@ -26,4 +26,6 @@ public:
     long long rpush(const string &key, const string &value);
     long long lpush(const string &key, const string &value);
     optional<vector<string>> lrange(const string &key, int left, int right);
+    long long llen(const string &key);
+    optional<string> lpop(const string &key);
 };

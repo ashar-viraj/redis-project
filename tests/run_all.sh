@@ -29,6 +29,7 @@ run_stage "$TESTS_DIR/test_expiry.sh"             "Stage 7: Key expiry (PX/EX)"
 run_stage "$TESTS_DIR/test_rpush.sh"              "Stage 8: RPUSH command"
 run_stage "$TESTS_DIR/test_lrange.sh"             "Stage 9/10: LRANGE command"
 run_stage "$TESTS_DIR/test_lpush.sh"              "Stage 11: LPUSH command"
+run_stage "$TESTS_DIR/test_lpop.sh"               "Stage 12: LPOP (multi-element)"
 
 echo "=============================="
 echo "Results: $PASS passed, $FAIL failed"

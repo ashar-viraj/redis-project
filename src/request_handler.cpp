@@ -42,9 +42,14 @@ RESPValue RequestHandler::handle(const RESPValue &req) {
     if(cmd == "LPUSH")
         return handleLpush(arr);
         
-
     if(cmd == "LRANGE")
         return handleLrange(arr);
+
+    if(cmd == "LLEN")
+        return handleLlen(arr);
+
+    if(cmd == "LPOP")
+        return handleLpop(arr);
 
     return {"ERR unkown command", '-'};
 }
@@ -72,12 +77,16 @@ RESPValue RequestHandler::handleSet(const RESPArray &arr) {
     if(arr.size() == 5) {
         string option = get<string>(arr[3].value);
         for(auto &e : option) e = toupper(e);
-        if(option == "PX")
-            px = stoll(get<string>(arr[4].value));
-        else if(option == "EX")
-            px = stoll(get<string>(arr[4].value)) * 1000;
-        else
-            return {"ERR Unsupported option.", '-'};
+        try {
+            if(option == "PX")
+                px = stoll(get<string>(arr[4].value));  
+            else if(option == "EX")
+                px = stoll(get<string>(arr[4].value)) * 1000;
+            else
+                return {"ERR Unsupported option.", '-'};
+        } catch (...) {
+            return {"expiry value is not an integer or out of range", '-'};
+        }
     }
 
     store.set(key, value, px);
@@ -135,7 +144,6 @@ RESPValue RequestHandler::handleLpush(const RESPArray &arr) {
     return {size, ':'};
 }
 
-
 RESPValue RequestHandler::handleLrange(const RESPArray &arr) {
     if(arr.size() != 4)
         return {"ERR wrong number of arguments.", '-'};
@@ -156,4 +164,66 @@ RESPValue RequestHandler::handleLrange(const RESPArray &arr) {
         result.push_back({e, '$'});
 
     return {result, '*'};
+}
+
+RESPValue RequestHandler::handleLlen(const RESPArray &arr) {
+    if(arr.size() != 2)
+        return {"ERR wrong number of arguments.", '-'};
+    
+    const string key = get<string>(arr[1].value);
+    
+    long long size = store.llen(key);
+    
+    if(size == -1)
+        return {"WRONGTYPE Operation against a key holding the wrong kind of value", '-'};
+        
+    return {size, ':'};
+}
+    
+RESPValue RequestHandler::handleLpop(const RESPArray &arr) {
+    if(arr.size() != 2 && arr.size() != 3)
+        return {"ERR wrong number of arguments.", '-'};
+
+    const string key = get<string>(arr[1].value);
+
+    int count = 1;
+    optional<string> poppedValue;
+
+    if(arr.size() == 3) {
+        try {
+            count = stoi(get<string>(arr[2].value));
+            if(count < 0)
+                return {"count is out of range, must be positive", '-'};
+        } catch(...) {
+            return {"count is not integer or out of range", '-'};
+        }
+
+        RESPArray result;
+
+        cout << "Count :" << count << endl;
+        while(count--) {
+            poppedValue = store.lpop(key);
+
+            if(!poppedValue) {
+                cout << "Not found\n";
+                break;
+            }
+            
+            cout << "Popped Value: " << poppedValue.value() << endl;
+            result.push_back({poppedValue.value(), '$'});
+        }
+
+        cout << "Result size: " << result.size() << endl;
+
+        return {result, '*'};
+
+    }
+    else {
+        poppedValue = store.lpop(key);
+
+        if(!poppedValue)
+            return {nullptr, '$'};
+
+        return {poppedValue.value(), '$'};
+    }
 }

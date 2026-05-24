@@ -18,4 +18,6 @@ private:
     RESPValue handleRpush(const RESPArray &arr);
     RESPValue handleLpush(const RESPArray &arr);
     RESPValue handleLrange(const RESPArray &arr);
+    RESPValue handleLlen(const RESPArray &arr);
+    RESPValue handleLpop(const RESPArray &arr);
 };
