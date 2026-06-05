@@ -33,9 +33,10 @@ send_cmd() {
 
 start_blpop() {
     local outfile="$1" key="$2"
+    local timeout_seconds="${3:-0}"
     (
         {
-            write_resp_command BLPOP "$key" 0
+            write_resp_command BLPOP "$key" "$timeout_seconds"
             sleep 8
         } | timeout 9 nc 127.0.0.1 6379 > "$outfile" 2>/dev/null
     ) &
@@ -43,8 +44,8 @@ start_blpop() {
 }
 
 wait_for_response() {
-    local file="$1" i
-    for i in $(seq 1 30); do
+    local file="$1" attempts="${2:-30}" i
+    for i in $(seq 1 "$attempts"); do
         [ -s "$file" ] && return 0
         sleep 0.1
     done
@@ -86,6 +87,7 @@ check_no_response() {
 
 expect_int()  { printf ':%d\r' "$1"; }
 expect_null() { printf '$-1\r'; }
+expect_null_array() { printf '*-1\r'; }
 
 expect_array() {
     local count=$# i=1
@@ -322,6 +324,204 @@ fi
 cleanup_client "$PID_TRI_FIRST"
 cleanup_client "$PID_TRI_SECOND"
 cleanup_client "$PID_TRI_THIRD"
+
+# ---------------------------------------------------------------------------
+# Test 8: BLPOP with a non-zero timeout returns a null array when it expires
+# ---------------------------------------------------------------------------
+RESP_TIMEOUT="$TMPDIR_LOCAL/blpop_timeout"
+start_blpop "$RESP_TIMEOUT" timeout_empty 0.2
+PID_TIMEOUT=$BLPOP_PID
+
+if wait_for_response "$RESP_TIMEOUT"; then
+    response=$(cat "$RESP_TIMEOUT")
+    check "BLPOP 0.2 timeout on empty list → null array" "$response" \
+        "$(expect_null_array)"
+else
+    fail "BLPOP 0.2 did not return after timeout"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+fi
+
+cleanup_client "$PID_TIMEOUT"
+
+# ---------------------------------------------------------------------------
+# Test 9: RPUSH before a non-zero timeout unblocks BLPOP with the pushed value
+# ---------------------------------------------------------------------------
+RESP_TIMEOUT_RPUSH="$TMPDIR_LOCAL/blpop_timeout_rpush"
+start_blpop "$RESP_TIMEOUT_RPUSH" timeout_rpush 1
+PID_TIMEOUT_RPUSH=$BLPOP_PID
+
+sleep 0.2
+check_no_response "BLPOP 1 waits before RPUSH arrives" "$RESP_TIMEOUT_RPUSH"
+
+response=$(send_cmd RPUSH timeout_rpush foo)
+check "RPUSH before BLPOP timeout → :1" "$response" "$(expect_int 1)"
+
+if wait_for_response "$RESP_TIMEOUT_RPUSH"; then
+    response=$(cat "$RESP_TIMEOUT_RPUSH")
+    check "BLPOP before timeout receives RPUSH value" "$response" \
+        "$(expect_array timeout_rpush foo)"
+else
+    fail "BLPOP did not receive RPUSH value before timeout"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+fi
+
+cleanup_client "$PID_TIMEOUT_RPUSH"
+
+# ---------------------------------------------------------------------------
+# Test 10: LPUSH before a non-zero timeout also unblocks BLPOP
+# ---------------------------------------------------------------------------
+RESP_TIMEOUT_LPUSH="$TMPDIR_LOCAL/blpop_timeout_lpush"
+start_blpop "$RESP_TIMEOUT_LPUSH" timeout_lpush 1
+PID_TIMEOUT_LPUSH=$BLPOP_PID
+
+sleep 0.2
+check_no_response "BLPOP 1 waits before LPUSH arrives" "$RESP_TIMEOUT_LPUSH"
+
+response=$(send_cmd LPUSH timeout_lpush lefty)
+check "LPUSH before BLPOP timeout → :1" "$response" "$(expect_int 1)"
+
+if wait_for_response "$RESP_TIMEOUT_LPUSH"; then
+    response=$(cat "$RESP_TIMEOUT_LPUSH")
+    check "BLPOP before timeout receives LPUSH value" "$response" \
+        "$(expect_array timeout_lpush lefty)"
+else
+    fail "BLPOP did not receive LPUSH value before timeout"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+fi
+
+cleanup_client "$PID_TIMEOUT_LPUSH"
+
+# ---------------------------------------------------------------------------
+# Test 11: Timed-out clients are skipped; remaining blocked clients can be woken
+# ---------------------------------------------------------------------------
+RESP_SHORT_TIMEOUT="$TMPDIR_LOCAL/blpop_short_timeout"
+RESP_LONG_TIMEOUT="$TMPDIR_LOCAL/blpop_long_timeout"
+
+start_blpop "$RESP_SHORT_TIMEOUT" timeout_fifo 0.2
+PID_SHORT_TIMEOUT=$BLPOP_PID
+sleep 0.1
+start_blpop "$RESP_LONG_TIMEOUT" timeout_fifo 1
+PID_LONG_TIMEOUT=$BLPOP_PID
+
+if wait_for_response "$RESP_SHORT_TIMEOUT"; then
+    response=$(cat "$RESP_SHORT_TIMEOUT")
+    check "Oldest BLPOP times out with null array" "$response" "$(expect_null_array)"
+else
+    fail "Oldest BLPOP did not time out"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+fi
+
+sleep 0.1
+check_no_response "Younger BLPOP remains blocked after older timeout" "$RESP_LONG_TIMEOUT"
+
+response=$(send_cmd RPUSH timeout_fifo survivor)
+check "RPUSH wakes younger non-expired BLPOP → :1" "$response" "$(expect_int 1)"
+
+if wait_for_response "$RESP_LONG_TIMEOUT"; then
+    response=$(cat "$RESP_LONG_TIMEOUT")
+    check "Younger BLPOP receives value after older timeout" "$response" \
+        "$(expect_array timeout_fifo survivor)"
+else
+    fail "Younger BLPOP did not receive value after older timeout"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+fi
+
+cleanup_client "$PID_SHORT_TIMEOUT"
+cleanup_client "$PID_LONG_TIMEOUT"
+
+# ---------------------------------------------------------------------------
+# Test 12: Race at the timeout boundary with multiple waiting clients
+#
+# The first client is intentionally close to its timeout when RPUSH happens.
+# Either outcome is acceptable at the boundary:
+# - if the push wins, client 1 gets racing_value and client 2 gets follow_up
+# - if the timeout wins, client 1 gets null, client 2 gets racing_value,
+#   and client 3 gets follow_up
+#
+# In both cases, the pushed values must be delivered exactly once and FIFO
+# order among non-expired clients must be preserved.
+# ---------------------------------------------------------------------------
+RESP_RACE_FIRST="$TMPDIR_LOCAL/blpop_race_first"
+RESP_RACE_SECOND="$TMPDIR_LOCAL/blpop_race_second"
+RESP_RACE_THIRD="$TMPDIR_LOCAL/blpop_race_third"
+
+start_blpop "$RESP_RACE_FIRST" timeout_race 0.45
+PID_RACE_FIRST=$BLPOP_PID
+sleep 0.05
+start_blpop "$RESP_RACE_SECOND" timeout_race 3
+PID_RACE_SECOND=$BLPOP_PID
+sleep 0.05
+start_blpop "$RESP_RACE_THIRD" timeout_race 3
+PID_RACE_THIRD=$BLPOP_PID
+
+sleep 0.35
+response=$(send_cmd RPUSH timeout_race racing_value)
+check "Boundary RPUSH during timeout race → :1" "$response" "$(expect_int 1)"
+
+sleep 0.2
+RACE_FIRST_RESPONSE=""
+RACE_SECOND_RESPONSE=""
+[ -s "$RESP_RACE_FIRST" ] && RACE_FIRST_RESPONSE=$(cat "$RESP_RACE_FIRST")
+[ -s "$RESP_RACE_SECOND" ] && RACE_SECOND_RESPONSE=$(cat "$RESP_RACE_SECOND")
+
+if [ "$RACE_FIRST_RESPONSE" = "$(expect_array timeout_race racing_value)" ]; then
+    pass "Timeout race: push reached oldest client before timeout"
+    PASS_COUNT=$((PASS_COUNT + 1))
+    check_no_response "Timeout race: second client still waits after first wins" \
+        "$RESP_RACE_SECOND"
+    check_no_response "Timeout race: third client still waits after first wins" \
+        "$RESP_RACE_THIRD"
+
+    response=$(send_cmd RPUSH timeout_race follow_up)
+    check "Timeout race follow-up RPUSH wakes second client → :1" "$response" \
+        "$(expect_int 1)"
+
+    if wait_for_response "$RESP_RACE_SECOND" 10; then
+        response=$(cat "$RESP_RACE_SECOND")
+        check "Timeout race: second client receives follow-up value" "$response" \
+            "$(expect_array timeout_race follow_up)"
+    else
+        fail "Timeout race: second client did not receive follow-up value"
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+    fi
+
+    check_no_response "Timeout race: third client remains blocked after two pushes" \
+        "$RESP_RACE_THIRD"
+elif [ "$RACE_FIRST_RESPONSE" = "$(expect_null_array)" ]; then
+    pass "Timeout race: oldest client timed out before push was fulfilled"
+    PASS_COUNT=$((PASS_COUNT + 1))
+
+    if [ -z "$RACE_SECOND_RESPONSE" ]; then
+        wait_for_response "$RESP_RACE_SECOND" 10
+        [ -s "$RESP_RACE_SECOND" ] && RACE_SECOND_RESPONSE=$(cat "$RESP_RACE_SECOND")
+    fi
+
+    check "Timeout race: second client receives racing value after first timeout" \
+        "$RACE_SECOND_RESPONSE" "$(expect_array timeout_race racing_value)"
+    check_no_response "Timeout race: third client waits after second wins racing value" \
+        "$RESP_RACE_THIRD"
+
+    response=$(send_cmd RPUSH timeout_race follow_up)
+    check "Timeout race follow-up RPUSH wakes third client → :1" "$response" \
+        "$(expect_int 1)"
+
+    if wait_for_response "$RESP_RACE_THIRD" 10; then
+        response=$(cat "$RESP_RACE_THIRD")
+        check "Timeout race: third client receives follow-up value" "$response" \
+            "$(expect_array timeout_race follow_up)"
+    else
+        fail "Timeout race: third client did not receive follow-up value"
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+    fi
+else
+    fail "Timeout race: first client got an unexpected response"
+    fail "  got      : $(printf '%s' "$RACE_FIRST_RESPONSE" | cat -A)"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+fi
+
+cleanup_client "$PID_RACE_FIRST"
+cleanup_client "$PID_RACE_SECOND"
+cleanup_client "$PID_RACE_THIRD"
 
 # ---------------------------------------------------------------------------
 rm -rf "$TMPDIR_LOCAL"

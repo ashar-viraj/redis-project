@@ -1,3 +1,27 @@
+# disconnected waiters should behave exactly like timed-out waiters
+struct WaitingClient
+{
+    mutex mtx;
+    condition_variable cv;
+
+    optional<string> poppedValue;
+
+    bool completed = false;
+
+    bool disconnected = false;
+};
+
+When socket thread detects:
+
+recv(...) <= 0
+
+it would mark:
+
+waiter->disconnected = true;
+waiter->completed = true;
+waiter->cv.notify_one();
+
+
 # RESP Parser TODOs
 
 These are postponed improvements for making the RESP parser production-safe.
@@ -186,3 +210,4 @@ Future solution:
 Required for real Redis behavior.
 
 ---
+

@@ -24,6 +24,7 @@ struct WaitingClient {
     mutex mtx;
     condition_variable cv;
     optional<string> poppedValue;
+    bool completed = false;
 };
 
 class Store{
@@ -39,5 +40,5 @@ public:
     optional<vector<string>> lrange(const string &key, int left, int right);
     long long llen(const string &key);
     optional<string> lpop(const string &key);
-    optional<pair<string, string>> blpop(const string &key);
+    optional<pair<string, string>> blpop(const string &key, double timeoutSeconds);
 };

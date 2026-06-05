@@ -211,12 +211,9 @@ RESPValue RequestHandler::handleLpop(const RESPArray &arr) {
                 cout << "Not found\n";
                 break;
             }
-            
-            cout << "Popped Value: " << poppedValue.value() << endl;
+
             result.push_back({poppedValue.value(), '$'});
         }
-
-        cout << "Result size: " << result.size() << endl;
 
         return {result, '*'};
 
@@ -236,8 +233,9 @@ RESPValue RequestHandler::handleBlpop(const RESPArray &arr) {
         return {"ERR wrong number of arguments.", '-'};
 
     string key = get<string>(arr[1].value);
+    string timeoutStr = get<string>(arr[2].value);
 
-    auto res = store.blpop(key);
+    auto res = store.blpop(key, stod(timeoutStr));
 
     if(!res)
         return {nullptr, '*'};

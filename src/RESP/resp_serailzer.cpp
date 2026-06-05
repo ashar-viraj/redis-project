@@ -21,8 +21,11 @@ string RESPSerializer::serialize(const RESPValue &value)
         return bulkString(value);
         // return bulkString(get<string>(value.value));
 
-    case '*':
+    case '*': {
+        if(!holds_alternative<RESPArray>(value.value))
+            return "*-1\r\n";
         return array(get<RESPArray>(value.value));
+    }
 
     default:
         throw runtime_error("Unknown type in Serializing.");

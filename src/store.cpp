@@ -49,11 +49,14 @@ long long Store::rpush(const string &key, const string &value) {
     if(!list)
         return -1;
 
-    if(!waiting[key].empty()) {
+    while(!waiting[key].empty()) {
         auto waiter = waiting[key].front();
         waiting[key].pop();
         {
             lock_guard g(waiter->mtx);
+            if(waiter->completed)
+                continue;
+            waiter->completed = true;
             waiter->poppedValue = value;
         }
 
@@ -81,11 +84,14 @@ long long Store::lpush(const string &key, const string &value) {
     if(!list)
         return -1;
 
-    if(!waiting[key].empty()) {
+    while(!waiting[key].empty()) {
         auto waiter = waiting[key].front();
         waiting[key].pop();
         {
             lock_guard g(waiter->mtx);
+            if(waiter->completed)
+                continue;
+            waiter->completed = true;
             waiter->poppedValue = value;
         }
 
@@ -151,7 +157,7 @@ optional<string> Store::lpop(const string &key) {
     return front;
 }
 
-optional<pair<string, string>> Store::blpop(const string &key) {
+optional<pair<string, string>> Store::blpop(const string &key, double timeoutSeconds) {
     shared_ptr<WaitingClient> waiter;
 
     {
@@ -178,9 +184,21 @@ optional<pair<string, string>> Store::blpop(const string &key) {
     }
 
     unique_lock lock(waiter->mtx);
-    waiter->cv.wait(lock, [&]{
-        return waiter->poppedValue.has_value();
-    });
 
-    return {{key, *waiter->poppedValue}};
+    if(timeoutSeconds == 0) {
+        waiter->cv.wait(lock, [&] {
+            return waiter->poppedValue.has_value();
+        });
+    } else {
+        auto timeout = chrono::milliseconds(static_cast<long long>(timeoutSeconds * 1000));
+        waiter->cv.wait_for(lock, timeout, [&] {
+            return waiter->completed;
+        });
+    }
+
+    if(waiter->poppedValue.has_value())
+        return {{key, *waiter->poppedValue}};
+
+    waiter->completed = true;
+    return nullopt;
 }
