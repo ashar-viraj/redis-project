@@ -45,12 +45,19 @@ void recieve_msg(int client_fd,
     // cout << "msg len : " << msg_len << (int)buffer[msg_len] << endl;
     buffer[msg_len] = '\0';
 
-    RESPValue req = parser.parse(buffer);
+    string resStr;
+    try{
+      RESPValue req = parser.parse(buffer);
 
-    RESPValue res = handler.handle(req);
+      RESPValue res = handler.handle(req);
 
-    string resStr = serializer.serialize(res);
+      resStr = serializer.serialize(res);
 
+    } catch (const exception &e) {
+      resStr = "-" + string(e.what()) + "\r\n";
+    }catch(...) {
+      resStr = "-ERR unknown error\r\n";
+    }
     memset(buffer, 0, sizeof(buffer));
     for (int i = 0; i < resStr.size(); i++)
       buffer[i] = resStr[i];

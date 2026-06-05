@@ -20,4 +20,5 @@ private:
     RESPValue handleLrange(const RESPArray &arr);
     RESPValue handleLlen(const RESPArray &arr);
     RESPValue handleLpop(const RESPArray &arr);
+    RESPValue handleBlpop(const RESPArray &arr);
 };

@@ -14,7 +14,7 @@ RESPValue RequestHandler::handle(const RESPValue &req) {
 
     RESPArray arr = get<RESPArray>(req.value);
 
-    if(arr.empty()) 
+    if(arr.empty())
         throw runtime_error("Empty command");
 
     string cmd = get<string>(arr[0].value);
@@ -41,7 +41,7 @@ RESPValue RequestHandler::handle(const RESPValue &req) {
 
     if(cmd == "LPUSH")
         return handleLpush(arr);
-        
+
     if(cmd == "LRANGE")
         return handleLrange(arr);
 
@@ -50,6 +50,9 @@ RESPValue RequestHandler::handle(const RESPValue &req) {
 
     if(cmd == "LPOP")
         return handleLpop(arr);
+
+    if(cmd == "BLPOP")
+        return handleBlpop(arr);
 
     return {"ERR unkown command", '-'};
 }
@@ -179,7 +182,7 @@ RESPValue RequestHandler::handleLlen(const RESPArray &arr) {
         
     return {size, ':'};
 }
-    
+
 RESPValue RequestHandler::handleLpop(const RESPArray &arr) {
     if(arr.size() != 2 && arr.size() != 3)
         return {"ERR wrong number of arguments.", '-'};
@@ -226,4 +229,22 @@ RESPValue RequestHandler::handleLpop(const RESPArray &arr) {
 
         return {poppedValue.value(), '$'};
     }
+}
+
+RESPValue RequestHandler::handleBlpop(const RESPArray &arr) {
+    if(arr.size() != 3)
+        return {"ERR wrong number of arguments.", '-'};
+
+    string key = get<string>(arr[1].value);
+
+    auto res = store.blpop(key);
+
+    if(!res)
+        return {nullptr, '*'};
+
+    RESPArray out;
+    out.push_back({res->first, '$'});
+    out.push_back({res->second, '$'});
+
+    return {out, '*'};
 }
