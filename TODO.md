@@ -1,3 +1,7 @@
+# there are no locking implemented in the store for many functionalities. Do add that later.
+
+It would need if multiple clients makes the request.
+
 # disconnected waiters should behave exactly like timed-out waiters
 struct WaitingClient
 {

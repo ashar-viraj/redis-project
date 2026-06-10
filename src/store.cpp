@@ -23,6 +23,33 @@ bool operator<(const StreamID &a, const StreamID &b) {
     return a.seq < b.seq;
 }
 
+string streamIDToString(StreamID id) {
+    return to_string(id.ms) + "-" + to_string(id.seq);
+}
+
+bool isPartialId(const string &id) {
+    size_t dashPos = id.find('-');
+    return dashPos != -1 && dashPos == id.size() - 2 && id.back() == '*';
+}
+
+StreamID generatePartialID(const StreamType &stream, long long ms) {
+    long long seq;
+
+    if(ms == 0)
+        seq = 1;
+    else
+        seq = 0;
+
+    for(auto itr = stream.rbegin(); itr != stream.rend(); itr++) {
+        if(itr->id.ms == ms) {
+            seq = itr->id.seq + 1;
+            break;
+        }
+    }
+
+    return {ms, seq};
+}
+
 // Implementations
 
 void Store::set(const string &key, const string &value, optional<long long> px) {
@@ -263,10 +290,6 @@ string Store::type(const string &key) {
 }
 
 string Store::xadd(const string &streamKey, const string &entryId, const vector<pair<string, string>> &fields) {
-    StreamID newId = parseStreamID(entryId);
-    if(newId.ms == 0 && newId.seq == 0)
-        throw runtime_error("ERR The ID specified in XADD must be greater than 0-0");
-
     auto itr = kv.find(streamKey);
 
     auto currTime = chrono::steady_clock::now();
@@ -282,20 +305,31 @@ string Store::xadd(const string &streamKey, const string &entryId, const vector<
         itr = kv.find(streamKey);
     }
 
-
     auto *stream = get_if<StreamType>(&itr->second.value);
-
     if(!stream)
         throw runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
 
+    StreamID newId;
+
+    if(isPartialId(entryId)) {
+        long long ms = stoll(entryId.substr(0, entryId.find('-')));
+
+        newId = generatePartialID(*stream, ms);
+    } else {
+        newId = parseStreamID(entryId);
+    }
+
+    if(newId.ms == 0 && newId.seq == 0)
+        throw runtime_error("ERR The ID specified in XADD must be greater than 0-0");
+
     if(!stream->empty()) {
-        StreamID lastId = parseStreamID(stream->back().id);
+        StreamID lastId = stream->back().id;
 
         if(!(lastId < newId))
             throw runtime_error("ERR The ID specified in XADD is equal or smaller than the target stream top item");
     }
 
-    stream->push_back({entryId, fields});
+    stream->push_back({newId, fields});
 
-    return entryId;
+    return streamIDToString(newId);
 }

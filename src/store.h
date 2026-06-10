@@ -16,7 +16,7 @@ struct StreamID{
     long long ms, seq;
 };
 struct StreamEntry {
-    string id;
+    StreamID id;
     vector<pair<string, string>> fields;
 };
 
