@@ -54,6 +54,9 @@ RESPValue RequestHandler::handle(const RESPValue &req) {
     if(cmd == "BLPOP")
         return handleBlpop(arr);
 
+    if(cmd == "TYPE")
+        return handleType(arr);
+
     return {"ERR unkown command", '-'};
 }
 
@@ -245,4 +248,13 @@ RESPValue RequestHandler::handleBlpop(const RESPArray &arr) {
     out.push_back({res->second, '$'});
 
     return {out, '*'};
+}
+
+RESPValue RequestHandler::handleType(const RESPArray &arr) {
+    if(arr.size() != 2)
+        return {"ERR wrong number of arguments.", '-'};
+
+    string key = get<string>(arr[1].value);
+
+    return {store.type(key), '+'};
 }

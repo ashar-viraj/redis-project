@@ -31,6 +31,8 @@ run_stage "$TESTS_DIR/test_lrange.sh"             "Stage 9/10: LRANGE command"
 run_stage "$TESTS_DIR/test_lpush.sh"              "Stage 11: LPUSH command"
 run_stage "$TESTS_DIR/test_lpop.sh"               "Stage 12: LPOP (multi-element)"
 run_stage "$TESTS_DIR/test_blpop.sh"              "Stage 13: BLPOP command"
+run_stage "$TESTS_DIR/test_type.sh"               "Stage 14: TYPE command"
+run_stage "$TESTS_DIR/test_type_advanced.sh"      "Stage 14 Extended: TYPE advanced cases"
 
 echo "=============================="
 echo "Results: $PASS passed, $FAIL failed"

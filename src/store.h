@@ -41,4 +41,6 @@ public:
     long long llen(const string &key);
     optional<string> lpop(const string &key);
     optional<pair<string, string>> blpop(const string &key, double timeoutSeconds);
+
+    string type(const string &key);
 };

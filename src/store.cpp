@@ -202,3 +202,23 @@ optional<pair<string, string>> Store::blpop(const string &key, double timeoutSec
     waiter->completed = true;
     return nullopt;
 }
+
+string Store::type(const string &key) {
+    auto itr = kv.find(key);
+
+    if(itr == kv.end())
+        return "none";
+
+    auto currTime = chrono::steady_clock::now();
+    if(itr->second.expiry && itr->second.expiry <= currTime) {
+        kv.erase(itr);
+        return "none";
+    }
+
+    auto *str = get_if<string>(&itr->second.value);
+
+    if(str)
+        return "string";
+
+    return "none";
+}
