@@ -23,6 +23,24 @@ bool operator<(const StreamID &a, const StreamID &b) {
     return a.seq < b.seq;
 }
 
+bool isInvalidEntryId(const string &id) {
+    if(id == "*")
+        return false;
+    int dashPos = id.find('-');
+    if(dashPos == 0 || dashPos == id.size()-1 || dashPos == -1)
+        return true;
+    for(int i = 0; i < dashPos; i++)
+        if(id[i] < '0' || id[i] > '9')
+            return true;
+    if(dashPos == id.size()-2 && id.back() == '*')
+        return false;
+    for(int i = dashPos + 1; i < id.size(); i++)
+        if(id[i] < '0' || id[i] > '9')
+            return true;
+
+    return false;
+}
+
 string streamIDToString(StreamID id) {
     return to_string(id.ms) + "-" + to_string(id.seq);
 }
@@ -48,6 +66,22 @@ StreamID generatePartialID(const StreamType &stream, long long ms) {
     }
 
     return {ms, seq};
+}
+
+StreamID generateAutoID(const StreamType &stream){
+    long long ms = chrono::duration_cast<chrono::milliseconds>(
+        chrono::system_clock::now().time_since_epoch()
+    ).count();
+
+    if(stream.empty())
+        return {ms, 0};
+
+    const StreamID &lastId = stream.back().id;
+
+    if(ms > lastId.ms)
+        return {ms, 0};
+
+    return {lastId.ms, lastId.seq + 1};
 }
 
 // Implementations
@@ -290,6 +324,9 @@ string Store::type(const string &key) {
 }
 
 string Store::xadd(const string &streamKey, const string &entryId, const vector<pair<string, string>> &fields) {
+    if(isInvalidEntryId(entryId))
+        throw runtime_error("ERR wrong type of argument in id. Should be of format <num>-<num>, *, <num>-*.");
+
     auto itr = kv.find(streamKey);
 
     auto currTime = chrono::steady_clock::now();
@@ -311,9 +348,11 @@ string Store::xadd(const string &streamKey, const string &entryId, const vector<
 
     StreamID newId;
 
-    if(isPartialId(entryId)) {
+    if(entryId == "*") {
+        newId = generateAutoID(*stream);
+    }
+    else if(isPartialId(entryId)) {
         long long ms = stoll(entryId.substr(0, entryId.find('-')));
-
         newId = generatePartialID(*stream, ms);
     } else {
         newId = parseStreamID(entryId);
