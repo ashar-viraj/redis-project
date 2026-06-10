@@ -9,6 +9,7 @@
 #include <netdb.h>
 #include <thread>
 #include <vector>
+#include <cerrno>
 
 #include "RESP/resp_parser.h"
 #include "request_handler.h"
@@ -18,13 +19,31 @@ using namespace std;
 
 #define MAX_BUFFER_LEN 1024
 
-void send_msg(char buffer[], int client_fd)
+// Important
+void send_msg(const string &message, int client_fd)
 {
-  int byte_sent = send(client_fd, buffer, strlen(buffer), 0);
-
-  if (byte_sent == -1)
+  size_t total_sent = 0;
+  while (total_sent < message.size())
   {
-    cout << "Error sending the msg.\n";
+    ssize_t byte_sent = send(
+        client_fd,
+        message.data() + total_sent,
+        message.size() - total_sent,
+        0);
+
+    if (byte_sent == -1)
+    {
+      if (errno == EINTR)
+        continue;
+
+      cout << "Error sending the msg.\n";
+      return;
+    }
+
+    if (byte_sent == 0)
+      return;
+
+    total_sent += static_cast<size_t>(byte_sent);
   }
 }
 
@@ -58,12 +77,7 @@ void recieve_msg(int client_fd,
     }catch(...) {
       resStr = "-ERR unknown error\r\n";
     }
-    memset(buffer, 0, sizeof(buffer));
-    for (int i = 0; i < resStr.size(); i++)
-      buffer[i] = resStr[i];
-    buffer[resStr.size()] = '\0';
-
-    send_msg(buffer, client_fd);
+    send_msg(resStr, client_fd);
   }
 
   close(client_fd);
