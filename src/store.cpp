@@ -38,6 +38,12 @@ long long Store::rpush(const string &key, const string &value) {
 
     auto itr = kv.find(key);
 
+    auto currTime = chrono::steady_clock::now();
+    if(itr != kv.end() && itr->second.expiry && itr->second.expiry <= currTime) {
+        kv.erase(itr);
+        itr = kv.end();
+    }
+
     if(itr == kv.end()) {
         ValueEntry entry;
         entry.value = ListType{};
@@ -72,6 +78,12 @@ long long Store::lpush(const string &key, const string &value) {
     lock_guard lock(storeMutex);
 
     auto itr = kv.find(key);
+
+    auto currTime = chrono::steady_clock::now();
+    if(itr != kv.end() && itr->second.expiry && itr->second.expiry <= currTime) {
+        kv.erase(itr);
+        itr = kv.end();
+    }
 
     if(itr == kv.end()) {
         ValueEntry entry;
@@ -111,9 +123,11 @@ optional<vector<string>> Store::lrange(const string &key, int left, int right) {
     if(itr == kv.end())
         return values;
 
-    auto *list = get_if<ListType>(&(itr->second.value));
+    ListType *list = get_if<ListType>(&(itr->second.value));
     if(!list)
-        return nullopt;
+        throw runtime_error(
+            "WRONGTYPE Operation against a key holding the wrong kind of value"
+        );
 
     int size = (int)list->size();
 
@@ -215,10 +229,41 @@ string Store::type(const string &key) {
         return "none";
     }
 
-    auto *str = get_if<string>(&itr->second.value);
-
-    if(str)
+    if(get_if<string>(&itr->second.value))
         return "string";
 
+    if(get_if<ListType>(&itr->second.value))
+        return "list";
+
+    if(get_if<StreamType>(&itr->second.value))
+        return "stream";
+
     return "none";
+}
+
+string Store::xadd(const string &streamKey, const string &entryId, const vector<pair<string, string>> &fields) {
+    auto itr = kv.find(streamKey);
+
+    auto currTime = chrono::steady_clock::now();
+    if(itr != kv.end() && itr->second.expiry && itr->second.expiry <= currTime) {
+        kv.erase(itr);
+        itr = kv.end();
+    }
+
+    if(itr == kv.end()) {
+        ValueEntry entry;
+        entry.value = StreamType{};
+        kv[streamKey] = move(entry);
+        itr = kv.find(streamKey);
+    }
+
+
+    auto *stream = get_if<StreamType>(&itr->second.value);
+
+    if(!stream)
+        throw runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
+
+    stream->push_back({entryId, fields});
+
+    return entryId;
 }

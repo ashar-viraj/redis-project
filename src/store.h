@@ -11,9 +11,14 @@
 #include <mutex>
 
 using namespace std;
+struct StreamEntry {
+    string id;
+    vector<pair<string, string>> fields;
+};
 
 using ListType = deque<string>;
-using RedisData = variant<string, ListType>;
+using StreamType = vector<StreamEntry>;
+using RedisData = variant<string, ListType, StreamType>;
 
 struct ValueEntry{
     RedisData value;
@@ -43,4 +48,5 @@ public:
     optional<pair<string, string>> blpop(const string &key, double timeoutSeconds);
 
     string type(const string &key);
+    string xadd(const string &streamKey, const string &entryId, const vector<pair<string, string>> &fields);
 };

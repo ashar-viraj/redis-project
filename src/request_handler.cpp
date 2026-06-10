@@ -57,6 +57,9 @@ RESPValue RequestHandler::handle(const RESPValue &req) {
     if(cmd == "TYPE")
         return handleType(arr);
 
+    if(cmd == "XADD")
+        return handleXadd(arr);
+
     return {"ERR unkown command", '-'};
 }
 
@@ -257,4 +260,25 @@ RESPValue RequestHandler::handleType(const RESPArray &arr) {
     string key = get<string>(arr[1].value);
 
     return {store.type(key), '+'};
+}
+
+RESPValue RequestHandler::handleXadd(const RESPArray &arr) {
+    if(arr.size() < 5 || (arr.size() - 3) % 2 != 0)
+        return {"ERR wrong number of arguments.", '-'};
+
+    const string key = get<string>(arr[1].value);
+    const string entryId = get<string>(arr[2].value);
+
+    vector<pair<string, string>> fields;
+    for(int i = 3; i < arr.size(); i += 2)
+        fields.push_back({get<string>(arr[i].value), get<string>(arr[i + 1].value)});
+
+    try {
+        string createdId = store.xadd(key, entryId, fields);
+        return {createdId, '$'};
+    } catch (const exception &e) {
+        return {e.what(), '-'};
+    } catch(...) {
+        return {"ERR unknown error", '-'};
+    }
 }
