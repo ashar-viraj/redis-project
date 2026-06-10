@@ -37,6 +37,7 @@ run_stage "$TESTS_DIR/test_xadd_stream.sh"        "Stage 15: XADD create stream"
 run_stage "$TESTS_DIR/test_xadd_id_validation.sh" "Stage 16: XADD entry ID validation"
 run_stage "$TESTS_DIR/test_xadd_partial_id.sh"    "Stage 17: XADD partial auto-generated IDs"
 run_stage "$TESTS_DIR/test_xadd_full_auto_id.sh"  "Stage 18: XADD fully auto-generated IDs"
+run_stage "$TESTS_DIR/test_xrange.sh"             "Stage 19: XRANGE stream queries"
 
 echo "=============================="
 echo "Results: $PASS passed, $FAIL failed"

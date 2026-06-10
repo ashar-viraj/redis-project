@@ -3,6 +3,8 @@
 #include <vector>
 #include <sstream>
 #include <cstring>
+#include <cctype>
+#include <cerrno>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -26,7 +28,7 @@ static std::vector<std::string> tokenize(const std::string &line)
     size_t i = 0;
     while (i < line.size())
     {
-        while (i < line.size() && std::isspace(line[i])) ++i;
+        while (i < line.size() && std::isspace(static_cast<unsigned char>(line[i]))) ++i;
         if (i >= line.size()) break;
 
         if (line[i] == '"')
@@ -38,13 +40,13 @@ static std::vector<std::string> tokenize(const std::string &line)
                 if (line[i] == '\\' && i + 1 < line.size()) ++i;
                 tok += line[i++];
             }
-            if (i < line.size()) ++i; // consume closing "
+            if (i < line.size()) ++i;
             tokens.push_back(tok);
         }
         else
         {
             std::string tok;
-            while (i < line.size() && !std::isspace(line[i]))
+            while (i < line.size() && !std::isspace(static_cast<unsigned char>(line[i])))
                 tok += line[i++];
             tokens.push_back(tok);
         }
@@ -52,110 +54,207 @@ static std::vector<std::string> tokenize(const std::string &line)
     return tokens;
 }
 
-// Read one complete RESP response from the socket and print it human-readably.
-static bool readResponse(int fd)
+static bool sendAll(int fd, const std::string &data)
 {
-    // Read until we have a full response. We use a simple byte-at-a-time
-    // approach which is fine for an interactive client.
-    std::string buf;
-    auto readLine = [&](std::string &out) -> bool {
-        out.clear();
-        while (true)
+    size_t sent = 0;
+    while (sent < data.size())
+    {
+        ssize_t n = send(fd, data.data() + sent, data.size() - sent, 0);
+        if (n < 0)
         {
-            char c;
-            int n = recv(fd, &c, 1, 0);
-            if (n <= 0) return false;
-            if (c == '\r') continue;
-            if (c == '\n') return true;
-            out += c;
+            if (errno == EINTR) continue;
+            return false;
         }
-    };
+        if (n == 0) return false;
+        sent += static_cast<size_t>(n);
+    }
+    return true;
+}
 
-    std::string firstLine;
-    if (!readLine(firstLine) || firstLine.empty()) return false;
+static bool recvByte(int fd, char &c)
+{
+    while (true)
+    {
+        ssize_t n = recv(fd, &c, 1, 0);
+        if (n == 1) return true;
+        if (n == 0) return false;
+        if (errno == EINTR) continue;
+        return false;
+    }
+}
 
-    char type = firstLine[0];
-    std::string body = firstLine.substr(1);
+static bool readLine(int fd, std::string &line)
+{
+    line.clear();
+    char c;
+    while (true)
+    {
+        if (!recvByte(fd, c)) return false;
+        if (c == '\r') continue;
+        if (c == '\n') return true;
+        line.push_back(c);
+    }
+}
+
+static void printIndent(int n)
+{
+    std::cout << std::string(n, ' ');
+}
+
+struct RespValue {
+    enum Type { SIMPLE, ERROR, INTEGER, BULK, ARRAY, NIL } type;
+    std::string text;
+    std::vector<RespValue> items;
+};
+
+static bool readExact(int fd, std::string &data, size_t len)
+{
+    data.resize(len);
+    size_t off = 0;
+
+    while (off < len)
+    {
+        ssize_t n = recv(fd, &data[off], len - off, 0);
+        if (n < 0)
+        {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        if (n == 0) return false;
+        off += static_cast<size_t>(n);
+    }
+
+    char crlf[2];
+    size_t got = 0;
+    while (got < 2)
+    {
+        ssize_t n = recv(fd, crlf + got, 2 - got, 0);
+        if (n < 0)
+        {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        if (n == 0) return false;
+        got += static_cast<size_t>(n);
+    }
+
+    return crlf[0] == '\r' && crlf[1] == '\n';
+}
+
+static bool parseResp(int fd, RespValue &out)
+{
+    std::string line;
+    if (!readLine(fd, line) || line.empty()) return false;
+
+    char type = line[0];
+    std::string body = line.substr(1);
 
     switch (type)
     {
-    case '+': // Simple string
-        std::cout << body << "\n";
-        break;
+        case '+':
+            out.type = RespValue::SIMPLE;
+            out.text = body;
+            return true;
 
-    case '-': // Error
-        std::cout << "(error) " << body << "\n";
-        break;
+        case '-':
+            out.type = RespValue::ERROR;
+            out.text = body;
+            return true;
 
-    case ':': // Integer
-        std::cout << "(integer) " << body << "\n";
-        break;
+        case ':':
+            out.type = RespValue::INTEGER;
+            out.text = body;
+            return true;
 
-    case '$': // Bulk string
-    {
-        int len = std::stoi(body);
-        if (len == -1)
+        case '$':
         {
-            std::cout << "(nil)\n";
-            break;
-        }
-        std::string data(len, '\0');
-        int received = 0;
-        while (received < len)
-        {
-            int n = recv(fd, &data[received], len - received, 0);
-            if (n <= 0) return false;
-            received += n;
-        }
-        // consume trailing \r\n
-        char crlf[2];
-        recv(fd, crlf, 2, 0);
-        std::cout << "\"" << data << "\"\n";
-        break;
-    }
-
-    case '*': // Array
-    {
-        int count = std::stoi(body);
-        if (count == -1)
-        {
-            std::cout << "(nil)\n";
-            break;
-        }
-        if (count == 0) { std::cout << "(empty array)\n"; break; }
-        for (int i = 0; i < count; i++)
-        {
-            std::string elemLine;
-            if (!readLine(elemLine) || elemLine.empty()) return false;
-            char elemType = elemLine[0];
-            std::string elemBody = elemLine.substr(1);
-            std::cout << (i + 1) << ") ";
-            if (elemType == '$')
+            long long len = std::stoll(body);
+            if (len == -1)
             {
-                int elen = std::stoi(elemBody);
-                if (elen == -1) { std::cout << "(nil)\n"; continue; }
-                std::string edata(elen, '\0');
-                int received = 0;
-                while (received < elen)
-                {
-                    int n = recv(fd, &edata[received], elen - received, 0);
-                    if (n <= 0) return false;
-                    received += n;
-                }
-                char crlf[2]; recv(fd, crlf, 2, 0);
-                std::cout << "\"" << edata << "\"\n";
+                out.type = RespValue::NIL;
+                return true;
             }
-            else if (elemType == '+') std::cout << elemBody << "\n";
-            else if (elemType == ':') std::cout << "(integer) " << elemBody << "\n";
-            else if (elemType == '-') std::cout << "(error) " << elemBody << "\n";
-            else std::cout << elemLine << "\n";
-        }
-        break;
-    }
 
-    default:
-        std::cout << firstLine << "\n";
+            std::string data;
+            if (!readExact(fd, data, static_cast<size_t>(len))) return false;
+            out.type = RespValue::BULK;
+            out.text = std::move(data);
+            return true;
+        }
+
+        case '*':
+        {
+            long long count = std::stoll(body);
+            if (count == -1)
+            {
+                out.type = RespValue::NIL;
+                return true;
+            }
+
+            out.type = RespValue::ARRAY;
+            out.items.clear();
+            out.items.reserve(static_cast<size_t>(count));
+
+            for (long long i = 0; i < count; ++i)
+            {
+                RespValue child;
+                if (!parseResp(fd, child)) return false;
+                out.items.push_back(std::move(child));
+            }
+            return true;
+        }
+
+        default:
+            return false;
     }
+}
+
+static void printPretty(const RespValue &v, int indent = 0)
+{
+    std::string pad(indent, ' ');
+
+    switch (v.type)
+    {
+        case RespValue::SIMPLE:
+            std::cout << "\"" << v.text << "\"";
+            break;
+
+        case RespValue::ERROR:
+            std::cout << "\"(error) " << v.text << "\"";
+            break;
+
+        case RespValue::INTEGER:
+            std::cout << v.text;
+            break;
+
+        case RespValue::BULK:
+            std::cout << "\"" << v.text << "\"";
+            break;
+
+        case RespValue::NIL:
+            std::cout << "null";
+            break;
+
+        case RespValue::ARRAY:
+            std::cout << "[\n";
+            for (size_t i = 0; i < v.items.size(); ++i)
+            {
+                std::cout << std::string(indent + 2, ' ');
+                printPretty(v.items[i], indent + 2);
+                if (i + 1 < v.items.size()) std::cout << ",";
+                std::cout << "\n";
+            }
+            std::cout << pad << "]";
+            break;
+    }
+}
+
+static bool readResponse(int fd)
+{
+    RespValue v;
+    if (!parseResp(fd, v)) return false;
+    printPretty(v);
+    std::cout << "\n";
     return true;
 }
 
@@ -199,10 +298,17 @@ int main(int argc, char **argv)
         if (tokens.empty()) continue;
 
         std::string req = encodeRESP(tokens);
-        int sent = send(fd, req.c_str(), req.size(), 0);
-        if (sent <= 0) { std::cerr << "Send failed\n"; break; }
+        if (!sendAll(fd, req))
+        {
+            std::cerr << "Send failed\n";
+            break;
+        }
 
-        if (!readResponse(fd)) { std::cerr << "Connection closed\n"; break; }
+        if (!readResponse(fd))
+        {
+            std::cerr << "Connection closed\n";
+            break;
+        }
     }
 
     close(fd);

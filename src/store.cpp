@@ -23,6 +23,27 @@ bool operator<(const StreamID &a, const StreamID &b) {
     return a.seq < b.seq;
 }
 
+bool operator<=(const StreamID &a, const StreamID &b) {
+    return !(b < a);
+}
+
+bool operator>=(const StreamID &a, const StreamID &b) {
+    return !(a < b);
+}
+
+StreamID parseRangeID(const string &id, bool isStart) {
+    size_t dash = id.find('-');
+
+    if(dash == string::npos) {
+        return {
+            stoll(id),
+            isStart ? 0 : LLONG_MAX
+        };
+    }
+
+    return parseStreamID(id);
+}
+
 bool isInvalidEntryId(const string &id) {
     if(id == "*")
         return false;
@@ -371,4 +392,29 @@ string Store::xadd(const string &streamKey, const string &entryId, const vector<
     stream->push_back({newId, fields});
 
     return streamIDToString(newId);
+}
+
+optional<StreamType> Store::xrange(const string &key, const string &startStr, const string &endStr) {
+    auto itr = kv.find(key);
+
+    if(itr == kv.end())
+        return vector<StreamEntry>{};
+
+    auto *stream = get_if<StreamType>(&itr->second.value);
+
+    if(!stream)
+        return nullopt;
+
+    StreamID start = parseRangeID(startStr, true), end = parseRangeID(endStr, false);
+
+    StreamType result;
+
+    for(int i = 0; i < stream->size(); i++) {
+        if(stream->at(i).id >= start && stream->at(i).id <= end) {
+            // cout << stream->at(i).id.ms << ' ' << stream->at(i).id.seq << ' ' << stream->at(i).fields.size() << endl;
+            result.push_back(stream->at(i));
+        }
+    }
+
+    return result;
 }

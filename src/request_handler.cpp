@@ -60,6 +60,9 @@ RESPValue RequestHandler::handle(const RESPValue &req) {
     if(cmd == "XADD")
         return handleXadd(arr);
 
+    if(cmd == "XRANGE")
+        return handleXrange(arr);
+
     return {"ERR unkown command", '-'};
 }
 
@@ -88,7 +91,7 @@ RESPValue RequestHandler::handleSet(const RESPArray &arr) {
         for(auto &e : option) e = toupper(e);
         try {
             if(option == "PX")
-                px = stoll(get<string>(arr[4].value));  
+                px = stoll(get<string>(arr[4].value));
             else if(option == "EX")
                 px = stoll(get<string>(arr[4].value)) * 1000;
             else
@@ -281,4 +284,41 @@ RESPValue RequestHandler::handleXadd(const RESPArray &arr) {
     } catch(...) {
         return {"ERR unknown error", '-'};
     }
+}
+
+RESPValue RequestHandler::handleXrange(const RESPArray &arr) {
+    if(arr.size() != 4)
+        return {"ERR wrong number of arguments.", '-'};
+
+    optional<StreamType> result = store.xrange(get<string>(arr[1].value),
+                                get<string>(arr[2].value),
+                                get<string>(arr[3].value));
+
+    if(!result)
+        return {
+            "WRONGTYPE Operation against a key holding the wrong kind of value",
+            '-'
+        };
+
+    RESPArray resp;
+
+    for(auto &e : *result) {
+        RESPArray respEntry;
+
+        respEntry.push_back({
+            streamIDToString(e.id),
+            '$'
+        });
+
+        RESPArray fields;
+        for(const auto &f : e.fields) {
+            fields.push_back({f.first, '$'});
+            fields.push_back({f.second, '$'});
+        }
+        respEntry.push_back({fields, '*'});
+        resp.push_back({respEntry, '*'});
+    }
+
+    cout << "XRANGE result size = " << resp.size() << endl;
+    return {resp, '*'};
 }

@@ -24,6 +24,17 @@ using ListType = deque<string>;
 using StreamType = vector<StreamEntry>;
 using RedisData = variant<string, ListType, StreamType>;
 
+StreamID parseStreamID(const string &id);
+bool operator<(const StreamID &a, const StreamID &b);
+bool operator<=(const StreamID &a, const StreamID &b);
+bool operator>=(const StreamID &a, const StreamID &b);
+StreamID parseRangeID(const string &id, bool isStart);
+bool isInvalidEntryId(const string &id);
+string streamIDToString(StreamID id);
+bool isPartialId(const string &id);
+StreamID generatePartialID(const StreamType &stream, long long ms);
+StreamID generateAutoID(const StreamType &stream);
+
 struct ValueEntry{
     RedisData value;
     optional<chrono::steady_clock::time_point> expiry;
@@ -53,4 +64,5 @@ public:
 
     string type(const string &key);
     string xadd(const string &streamKey, const string &entryId, const vector<pair<string, string>> &fields);
+    optional<StreamType> xrange(const string &key, const string &start, const string &end);
 };

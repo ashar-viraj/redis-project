@@ -24,4 +24,5 @@ private:
 
     RESPValue handleType(const RESPArray &arr);
     RESPValue handleXadd(const RESPArray &arr);
+    RESPValue handleXrange(const RESPArray &arr);
 };

@@ -52,7 +52,6 @@ start_server() {
     # Stream server logs to terminal with a prefix, in background
     tail -f /tmp/redis_test.log 2>/dev/null | sed 's/^/  \x1b[2m[server]\x1b[0m /' &
     TAIL_PID=$!
-    SERVER_PID=$!
     sleep 0.3   # let it bind
     if ! kill -0 "$SERVER_PID" 2>/dev/null; then
         fail "Server failed to start (see /tmp/redis_test.log)"
