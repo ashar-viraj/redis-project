@@ -4,6 +4,27 @@
 #include <stdexcept>
 #include <iostream>
 
+// Helper functions
+StreamID parseStreamID(const string &id) {
+    size_t dashPos = id.find('-');
+
+    if(dashPos == -1)
+        throw runtime_error("Invalid Stream ID format");
+
+    return {
+        stoll(id.substr(0, dashPos)),
+        stoll(id.substr(dashPos + 1))
+    };
+}
+
+bool operator<(const StreamID &a, const StreamID &b) {
+    if(a.ms != b.ms)
+        return a.ms < b.ms;
+    return a.seq < b.seq;
+}
+
+// Implementations
+
 void Store::set(const string &key, const string &value, optional<long long> px) {
     ValueEntry entry;
 
@@ -242,6 +263,10 @@ string Store::type(const string &key) {
 }
 
 string Store::xadd(const string &streamKey, const string &entryId, const vector<pair<string, string>> &fields) {
+    StreamID newId = parseStreamID(entryId);
+    if(newId.ms == 0 && newId.seq == 0)
+        throw runtime_error("ERR The ID specified in XADD must be greater than 0-0");
+
     auto itr = kv.find(streamKey);
 
     auto currTime = chrono::steady_clock::now();
@@ -262,6 +287,13 @@ string Store::xadd(const string &streamKey, const string &entryId, const vector<
 
     if(!stream)
         throw runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
+
+    if(!stream->empty()) {
+        StreamID lastId = parseStreamID(stream->back().id);
+
+        if(!(lastId < newId))
+            throw runtime_error("ERR The ID specified in XADD is equal or smaller than the target stream top item");
+    }
 
     stream->push_back({entryId, fields});
 

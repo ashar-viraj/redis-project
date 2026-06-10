@@ -11,6 +11,10 @@
 #include <mutex>
 
 using namespace std;
+
+struct StreamID{
+    long long ms, seq;
+};
 struct StreamEntry {
     string id;
     vector<pair<string, string>> fields;

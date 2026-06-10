@@ -34,6 +34,7 @@ run_stage "$TESTS_DIR/test_blpop.sh"              "Stage 13: BLPOP command"
 run_stage "$TESTS_DIR/test_type.sh"               "Stage 14: TYPE command"
 run_stage "$TESTS_DIR/test_type_advanced.sh"      "Stage 14 Extended: TYPE advanced cases"
 run_stage "$TESTS_DIR/test_xadd_stream.sh"        "Stage 15: XADD create stream"
+run_stage "$TESTS_DIR/test_xadd_id_validation.sh" "Stage 16: XADD entry ID validation"
 
 echo "=============================="
 echo "Results: $PASS passed, $FAIL failed"
