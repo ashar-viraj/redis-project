@@ -38,6 +38,8 @@ run_stage "$TESTS_DIR/test_xadd_id_validation.sh" "Stage 16: XADD entry ID valid
 run_stage "$TESTS_DIR/test_xadd_partial_id.sh"    "Stage 17: XADD partial auto-generated IDs"
 run_stage "$TESTS_DIR/test_xadd_full_auto_id.sh"  "Stage 18: XADD fully auto-generated IDs"
 run_stage "$TESTS_DIR/test_xrange.sh"             "Stage 19: XRANGE stream queries"
+run_stage "$TESTS_DIR/test_xrange_start_dash.sh"  "Stage 20: XRANGE with '-' start ID"
+run_stage "$TESTS_DIR/test_xrange_end_plus.sh"    "Stage 21: XRANGE with '+' end ID"
 
 echo "=============================="
 echo "Results: $PASS passed, $FAIL failed"

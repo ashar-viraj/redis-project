@@ -319,6 +319,5 @@ RESPValue RequestHandler::handleXrange(const RESPArray &arr) {
         resp.push_back({respEntry, '*'});
     }
 
-    cout << "XRANGE result size = " << resp.size() << endl;
     return {resp, '*'};
 }

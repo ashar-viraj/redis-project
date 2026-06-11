@@ -32,6 +32,12 @@ bool operator>=(const StreamID &a, const StreamID &b) {
 }
 
 StreamID parseRangeID(const string &id, bool isStart) {
+    if(id == "-")
+        return {0, 0};
+
+    if(id == "+")
+        return {LLONG_MAX, LLONG_MAX};
+
     size_t dash = id.find('-');
 
     if(dash == string::npos) {
@@ -409,11 +415,15 @@ optional<StreamType> Store::xrange(const string &key, const string &startStr, co
 
     StreamType result;
 
-    for(int i = 0; i < stream->size(); i++) {
-        if(stream->at(i).id >= start && stream->at(i).id <= end) {
-            // cout << stream->at(i).id.ms << ' ' << stream->at(i).id.seq << ' ' << stream->at(i).fields.size() << endl;
-            result.push_back(stream->at(i));
-        }
+    auto startItr = lower_bound(stream->begin(), stream->end(), start, [](const StreamEntry &entry, const StreamID &id) {
+        return entry.id < id;
+    });
+
+    for(auto itr = startItr; itr != stream->end(); itr++) {
+        if(end < itr->id)
+            break;
+
+        result.push_back(*itr);
     }
 
     return result;
