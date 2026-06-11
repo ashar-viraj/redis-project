@@ -41,6 +41,7 @@ run_stage "$TESTS_DIR/test_xrange.sh"             "Stage 19: XRANGE stream queri
 run_stage "$TESTS_DIR/test_xrange_start_dash.sh"  "Stage 20: XRANGE with '-' start ID"
 run_stage "$TESTS_DIR/test_xrange_end_plus.sh"    "Stage 21: XRANGE with '+' end ID"
 run_stage "$TESTS_DIR/test_xread.sh"              "Stage 22: XREAD single stream queries"
+run_stage "$TESTS_DIR/test_xread_multiple_streams.sh" "Stage 23: XREAD multiple stream queries"
 
 echo "=============================="
 echo "Results: $PASS passed, $FAIL failed"

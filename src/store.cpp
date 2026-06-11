@@ -438,7 +438,7 @@ optional<StreamType> Store::xread(const string &key, const string &idStr) {
     auto *stream = get_if<StreamType>(&itr->second.value);
 
     if(!stream)
-        return nullopt;
+        throw runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
 
     StreamID id = parseRangeID(idStr, false);
 
@@ -448,6 +448,8 @@ optional<StreamType> Store::xread(const string &key, const string &idStr) {
     });
 
     StreamType result(startItr, stream->end());
+
+    // cout << "Result size : " << result.size() << endl;
 
     return result;
 }
