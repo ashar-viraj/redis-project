@@ -63,6 +63,9 @@ RESPValue RequestHandler::handle(const RESPValue &req) {
     if(cmd == "XRANGE")
         return handleXrange(arr);
 
+    if(cmd == "XREAD")
+        return handleXread(arr);
+
     return {"ERR unkown command", '-'};
 }
 
@@ -320,4 +323,59 @@ RESPValue RequestHandler::handleXrange(const RESPArray &arr) {
     }
 
     return {resp, '*'};
+}
+
+RESPValue RequestHandler::handleXread(const RESPArray &arr) {
+    if(arr.size() != 4)
+        return {"ERR wrong number of arguments.", '-'};
+
+    string keyword = get<string>(arr[1].value);
+    for(auto &ch : keyword)
+        ch = toupper(ch);
+
+    if(keyword != "STREAMS")
+        return {"ERR syntax error", '-'};
+
+    string key = get<string>(arr[2].value);
+    string id = get<string>(arr[3].value);
+
+    auto result = store.xread(key, id);
+
+    if(!result.has_value())
+        return {nullptr, '*'};
+
+    RESPArray entries;
+
+    for(const auto &entry : *result) {
+        RESPArray singleEntry;
+        singleEntry.push_back({
+            streamIDToString(entry.id),
+            '$'
+        });
+
+        RESPArray fieldValues;
+        for(const auto &field : entry.fields) {
+            fieldValues.push_back({field.first, '$'});
+            fieldValues.push_back({field.second, '$'});
+        }
+
+        singleEntry.push_back({fieldValues, '*'});
+
+        entries.push_back({singleEntry, '*'});
+    }
+
+    RESPArray streamResponse;
+    if(entries.size()) {
+        streamResponse.push_back({key, '$'});
+        streamResponse.push_back({entries, '*'});
+    }
+
+    RESPArray response;
+    if(streamResponse.size())
+        response.push_back({streamResponse, '*'});
+
+    if(response.empty())
+        return {nullptr, '*'};
+
+    return {response, '*'};
 }

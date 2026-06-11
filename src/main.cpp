@@ -146,7 +146,7 @@ int main(int argc, char **argv)
       cout << "Client connection failed.\n";
       continue;
     }
-    std::cout << "Client connected\n";
+    // std::cout << "Client connected\n";
     thread(recieve_msg, client_fd, ref(parser), ref(handler), ref(serializer)).detach();
 
     // recieve_msg(client_fd);

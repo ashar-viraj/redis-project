@@ -65,4 +65,5 @@ public:
     string type(const string &key);
     string xadd(const string &streamKey, const string &entryId, const vector<pair<string, string>> &fields);
     optional<StreamType> xrange(const string &key, const string &start, const string &end);
+    optional<StreamType> xread(const string &key, const string &id);
 };

@@ -428,3 +428,26 @@ optional<StreamType> Store::xrange(const string &key, const string &startStr, co
 
     return result;
 }
+
+optional<StreamType> Store::xread(const string &key, const string &idStr) {
+    auto itr = kv.find(key);
+
+    if(itr == kv.end())
+        return nullopt;
+
+    auto *stream = get_if<StreamType>(&itr->second.value);
+
+    if(!stream)
+        return nullopt;
+
+    StreamID id = parseRangeID(idStr, false);
+
+    auto startItr = upper_bound(stream->begin(), stream->end(), id,
+    [](const StreamID &id, const StreamEntry &entry){
+        return id < entry.id;
+    });
+
+    StreamType result(startItr, stream->end());
+
+    return result;
+}
