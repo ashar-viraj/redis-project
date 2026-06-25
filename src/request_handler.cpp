@@ -326,38 +326,84 @@ RESPValue RequestHandler::handleXrange(const RESPArray &arr) {
 }
 
 RESPValue RequestHandler::handleXread(const RESPArray &arr) {
-    if(arr.size() < 4 || (arr.size() % 2 != 0))
+    if(arr.size() < 4)
         return {"ERR wrong number of arguments.", '-'};
 
-    string keyword = get<string>(arr[1].value);
+    bool blocking = false;
+    long long timeoutMs = 0;
+    int streamsIdx = 1;
+
+    string firstKeyword = get<string>(arr[1].value);
+    for(auto &ch : firstKeyword)
+        ch = toupper(ch);
+
+    if(firstKeyword == "BLOCK") {
+        if(arr.size() < 6)
+            return {"ERR wrong number of arguments.", '-'};
+
+        blocking = true;
+
+        try {
+            timeoutMs = stoll(get<string>(arr[2].value));
+        } catch(...) {
+            return {"ERR timeout is not an integer or out of range", '-'};
+        }
+
+        if(timeoutMs < 0)
+            return {"ERR timeout is negative", '-'};
+
+        streamsIdx = 3;
+    }
+
+    string keyword = get<string>(arr[streamsIdx].value);
     for(auto &ch : keyword)
         ch = toupper(ch);
 
     if(keyword != "STREAMS")
         return {"ERR syntax error", '-'};
 
-    int keyIdx = 2, idIdx = arr.size() / 2 + 1;
+    int streamArgs = arr.size() - streamsIdx - 1;
+    if(streamArgs < 2 || streamArgs % 2 != 0)
+        return {"ERR wrong number of arguments.", '-'};
+
+    int streamCount = streamArgs / 2;
+    int keyIdx = streamsIdx + 1;
+    int idIdx = keyIdx + streamCount;
+
+    vector<pair<string, string>> requestedStreams;
+
+    for(int i = 0; i < streamCount; i++) {
+        string key = get<string>(arr[keyIdx + i].value);
+        string id = get<string>(arr[idIdx + i].value);
+
+        requestedStreams.push_back({key, id});
+    }
+
+    vector<pair<string, StreamType>> streamResults;
+
+    if(blocking) {
+        auto result = store.xreadBlocking(requestedStreams, timeoutMs);
+        if(!result)
+            return {nullptr, '*'};
+
+        streamResults = *result;
+    } else {
+        for(const auto &[key, id] : requestedStreams) {
+            auto result = store.xread(key, id);
+
+            if(!result || result->empty())
+                continue;
+
+            streamResults.push_back({key, *result});
+        }
+    }
 
     RESPArray response;
 
-    while(idIdx < arr.size()) {
-        string key = get<string>(arr[keyIdx++].value);
-        string id = get<string>(arr[idIdx++].value);
-
-        // cout << "checking for : " << key << ' ' << id << endl;
-
-        auto result = store.xread(key, id);
-
-        if(!result || result->empty())
-            continue;
-            // return {nullptr, '*'};
-
-        // if(result->empty())
-        //     continue;
-
+    for(const auto &[key, entriesResult] : streamResults) {
         RESPArray entries;
 
-        for(const auto &entry : *result) {
+        for(const auto &entry : entriesResult) {
             RESPArray singleEntry;
             singleEntry.push_back({
                 streamIDToString(entry.id),
@@ -375,17 +421,16 @@ RESPValue RequestHandler::handleXread(const RESPArray &arr) {
             entries.push_back({singleEntry, '*'});
         }
 
+        if(entries.empty())
+            continue;
+
         RESPArray streamResponse;
+        streamResponse.push_back({key, '$'});
+        streamResponse.push_back({entries, '*'});
 
-        if(entries.size()) {
-            streamResponse.push_back({key, '$'});
-            streamResponse.push_back({entries, '*'});
-        }
-
-        if(streamResponse.size())
-            response.push_back({streamResponse, '*'});
-
+        response.push_back({streamResponse, '*'});
     }
+
     if(response.empty())
         return {nullptr, '*'};
 

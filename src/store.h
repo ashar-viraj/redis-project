@@ -9,6 +9,8 @@
 #include <variant>
 #include <condition_variable>
 #include <mutex>
+#include <memory>
+#include <vector>
 
 using namespace std;
 
@@ -47,10 +49,17 @@ struct WaitingClient {
     bool completed = false;
 };
 
+struct StreamWaitingClient {
+    mutex mtx;
+    condition_variable cv;
+    bool completed = false;
+};
+
 class Store{
 private:
     map<string, ValueEntry> kv;
     map<string, queue<shared_ptr<WaitingClient>>> waiting;
+    map<string, deque<shared_ptr<StreamWaitingClient>>> streamWaiting;
     mutex storeMutex;
 public:
     void set(const string &key, const string &value, optional<long long> px);
@@ -66,4 +75,5 @@ public:
     string xadd(const string &streamKey, const string &entryId, const vector<pair<string, string>> &fields);
     optional<StreamType> xrange(const string &key, const string &start, const string &end);
     optional<StreamType> xread(const string &key, const string &id);
+    optional<vector<pair<string, StreamType>>> xreadBlocking(const vector<pair<string, string>> &streams, long long timeoutMs);
 };
