@@ -66,6 +66,9 @@ RESPValue RequestHandler::handle(const RESPValue &req) {
     if(cmd == "XREAD")
         return handleXread(arr);
 
+    if(cmd == "INCR")
+        return handleIncr(arr);
+
     return {"ERR unkown command", '-'};
 }
 
@@ -435,4 +438,19 @@ RESPValue RequestHandler::handleXread(const RESPArray &arr) {
         return {nullptr, '*'};
 
     return {response, '*'};
+}
+
+RESPValue RequestHandler::handleIncr(const RESPArray &arr) {
+    if(arr.size() != 2)
+        return {"ERR wrong number of arguments.", '-'};
+
+    const string key = get<string>(arr[1].value);
+
+    optional<long long> result = store.incr(key);
+
+    if(!result) {
+        return {"ERR value is not an integer or out of range", '-'};
+    }
+
+    return {*result, ':'};
 }

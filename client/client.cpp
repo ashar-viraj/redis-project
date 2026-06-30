@@ -220,7 +220,7 @@ static void printPretty(const RespValue &v, int indent = 0)
             break;
 
         case RespValue::ERROR:
-            std::cout << "\"(error) " << v.text << "\"";
+            std::cout << "(error) " << v.text << "";
             break;
 
         case RespValue::INTEGER:

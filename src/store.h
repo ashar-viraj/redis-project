@@ -36,7 +36,6 @@ string streamIDToString(StreamID id);
 bool isPartialId(const string &id);
 StreamID generatePartialID(const StreamType &stream, long long ms);
 StreamID generateAutoID(const StreamType &stream);
-
 struct ValueEntry{
     RedisData value;
     optional<chrono::steady_clock::time_point> expiry;
@@ -57,11 +56,14 @@ struct StreamWaitingClient {
 
 class Store{
 private:
+    using Iterator = map<string, ValueEntry>::iterator;
+
     map<string, ValueEntry> kv;
     map<string, queue<shared_ptr<WaitingClient>>> waiting;
     map<string, deque<shared_ptr<StreamWaitingClient>>> streamWaiting;
     mutex storeMutex;
 public:
+    Iterator findValidKey(const string& key);
     void set(const string &key, const string &value, optional<long long> px);
     optional<string> get(const string &key);
     long long rpush(const string &key, const string &value);
@@ -76,4 +78,5 @@ public:
     optional<StreamType> xrange(const string &key, const string &start, const string &end);
     optional<StreamType> xread(const string &key, const string &id);
     optional<vector<pair<string, StreamType>>> xreadBlocking(const vector<pair<string, string>> &streams, long long timeoutMs);
+    optional<long long> incr(const string &key);
 };

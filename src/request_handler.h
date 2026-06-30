@@ -26,4 +26,5 @@ private:
     RESPValue handleXadd(const RESPArray &arr);
     RESPValue handleXrange(const RESPArray &arr);
     RESPValue handleXread(const RESPArray &arr);
+    RESPValue handleIncr(const RESPArray &arr);
 };

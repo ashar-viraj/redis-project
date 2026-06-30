@@ -1,3 +1,45 @@
+### Current Design
+
+* The `Store` uses a single global mutex (`storeMutex`).
+* Every command (`GET`, `SET`, `LPUSH`, `RPUSH`, `XADD`, `XRANGE`, etc.) acquires this mutex.
+* As a result, only one client request can execute at a time, even if different clients operate on unrelated keys.
+
+### Future Improvements
+
+#### Option 1: Use `std::shared_mutex`
+
+* Replace `std::mutex` with `std::shared_mutex`.
+* Acquire a `shared_lock` for read-only commands (`GET`, `TYPE`, `LLEN`, `LRANGE`, `XRANGE`, `XREAD`).
+* Acquire a `unique_lock` for write commands (`SET`, `DEL`, `LPUSH`, `RPUSH`, `LPOP`, `XADD`, etc.).
+* Allows multiple readers while maintaining exclusive access for writers.
+
+#### Option 2: Per-Key Locking
+
+* Maintain a mutex for each key instead of a single global mutex.
+* Operations on different keys can execute in parallel.
+* Requires careful handling of mutex lifetime and commands involving multiple keys.
+
+#### Option 3: Per-Object Locking
+
+* Store a mutex alongside each value (String/List/Stream).
+* The global lock is used only for map lookups, insertions, and deletions.
+* After locating the object, lock only that object's mutex.
+
+#### Option 4: Sharded Store
+
+* Partition the keyspace into multiple shards.
+* Each shard maintains its own hashmap and mutex.
+* Hash the key to determine the shard, allowing operations on different shards to proceed concurrently.
+
+### Notes
+
+* The current implementation is perfectly adequate for Codecrafters and keeps the implementation simple.
+* If evolving this into a production-quality Redis clone, the recommended progression is:
+
+  1. Introduce `std::shared_mutex`.
+  2. Move to per-object or per-key locking.
+  3. Add sharding if higher throughput is required.
+
 # there are no locking implemented in the store for many functionalities. Do add that later.
 
 It would need if multiple clients makes the request.

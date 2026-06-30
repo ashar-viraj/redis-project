@@ -77,6 +77,21 @@ bool isPartialId(const string &id) {
     return dashPos != -1 && dashPos == id.size() - 2 && id.back() == '*';
 }
 
+bool isInteger(string s) {
+    if(s.empty())
+        return true;
+    int i = 0;
+    if(s[i] == '-' || s[i] == '+')
+        i++;
+    while(i < s.size()) {
+        if(s[i] < '0' || s[i] > '9')
+            return false;
+        i++;
+    }
+
+    return true;
+}
+
 StreamID generatePartialID(const StreamType &stream, long long ms) {
     long long seq;
 
@@ -111,6 +126,21 @@ StreamID generateAutoID(const StreamType &stream){
     return {lastId.ms, lastId.seq + 1};
 }
 
+Store::Iterator Store::findValidKey(const string& key) {
+    auto itr = kv.find(key);
+
+    if (itr == kv.end()) {
+        return itr;
+    }
+
+    if (itr->second.expiry && itr->second.expiry <= chrono::steady_clock::now()) {
+        kv.erase(itr);
+        return kv.end();
+    }
+
+    return itr;
+}
+
 // Implementations
 
 void Store::set(const string &key, const string &value, optional<long long> px) {
@@ -129,18 +159,12 @@ void Store::set(const string &key, const string &value, optional<long long> px) 
 optional<string> Store::get(const string &key) {
     lock_guard lock(storeMutex);
 
-    if(kv.find(key) == kv.end())
+    auto itr = findValidKey(key);
+
+    if (itr == kv.end())
         return nullopt;
 
-    auto now = chrono::steady_clock::now();
-
-    if(kv[key].expiry && kv[key].expiry <= now) {
-        kv.erase(key);
-
-        return nullopt;
-    }
-
-    auto* str = get_if<string>(&kv[key].value);
+    auto* str = get_if<string>(&itr->second.value);
     if(!str)
         return nullopt;
     return *str;
@@ -149,13 +173,7 @@ optional<string> Store::get(const string &key) {
 long long Store::rpush(const string &key, const string &value) {
     lock_guard lock(storeMutex);
 
-    auto itr = kv.find(key);
-
-    auto currTime = chrono::steady_clock::now();
-    if(itr != kv.end() && itr->second.expiry && itr->second.expiry <= currTime) {
-        kv.erase(itr);
-        itr = kv.end();
-    }
+    auto itr = findValidKey(key);
 
     if(itr == kv.end()) {
         ValueEntry entry;
@@ -190,13 +208,7 @@ long long Store::rpush(const string &key, const string &value) {
 long long Store::lpush(const string &key, const string &value) {
     lock_guard lock(storeMutex);
 
-    auto itr = kv.find(key);
-
-    auto currTime = chrono::steady_clock::now();
-    if(itr != kv.end() && itr->second.expiry && itr->second.expiry <= currTime) {
-        kv.erase(itr);
-        itr = kv.end();
-    }
+    auto itr = findValidKey(key);
 
     if(itr == kv.end()) {
         ValueEntry entry;
@@ -339,16 +351,10 @@ optional<pair<string, string>> Store::blpop(const string &key, double timeoutSec
 string Store::type(const string &key) {
     lock_guard lock(storeMutex);
 
-    auto itr = kv.find(key);
+    auto itr = findValidKey(key);
 
-    if(itr == kv.end())
+    if (itr == kv.end())
         return "none";
-
-    auto currTime = chrono::steady_clock::now();
-    if(itr->second.expiry && itr->second.expiry <= currTime) {
-        kv.erase(itr);
-        return "none";
-    }
 
     if(get_if<string>(&itr->second.value))
         return "string";
@@ -368,13 +374,7 @@ string Store::xadd(const string &streamKey, const string &entryId, const vector<
     if(isInvalidEntryId(entryId))
         throw runtime_error("ERR wrong type of argument in id. Should be of format <num>-<num>, *, <num>-*.");
 
-    auto itr = kv.find(streamKey);
-
-    auto currTime = chrono::steady_clock::now();
-    if(itr != kv.end() && itr->second.expiry && itr->second.expiry <= currTime) {
-        kv.erase(itr);
-        itr = kv.end();
-    }
+    auto itr = findValidKey(streamKey);
 
     if(itr == kv.end()) {
         ValueEntry entry;
@@ -605,4 +605,42 @@ optional<vector<pair<string, StreamType>>> Store::xreadBlocking(const vector<pai
         return nullopt;
 
     return available;
+}
+
+optional<long long> Store::incr(const string &key) {
+    lock_guard lock(storeMutex);
+
+    auto itr = findValidKey(key);
+
+    if(itr == kv.end()) {
+        ValueEntry entry;
+        entry.value = "1";
+        entry.expiry = nullopt;
+
+        kv[key] = entry;
+        return 1;
+    }
+
+    try {
+        auto *oldValuePtr = get_if<string>(&itr->second.value);
+
+        if(!oldValuePtr)
+            throw runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
+        if(!isInteger(*oldValuePtr))
+            throw runtime_error("ERR value is not an integer or out of range");
+
+        long long oldValue = stoll(*oldValuePtr);
+        long long newValue = oldValue+1;
+        if(newValue < oldValue)
+            throw runtime_error("ERR value is not an integer or out of range");
+
+        *get_if<string>(&itr->second.value) = to_string(newValue);
+        return newValue;
+    } catch (const invalid_argument&) {
+        return nullopt;
+    } catch (const out_of_range&) {
+        return nullopt;
+    }
+
+    return nullopt;
 }
