@@ -53,6 +53,12 @@ RESPValue RequestHandler::executeCommand(const string &cmd, const RESPArray &arr
     if(cmd == "INCR")
         return handleIncr(arr);
 
+    if(cmd == "WATCH")
+        return handleWatch(arr);
+
+    if(cmd == "UNWATCH")
+        return handleUnwatch(arr);
+
     return {"ERR unkown command", '-'};
 }
 
@@ -74,7 +80,7 @@ RESPValue RequestHandler::handle(const RESPValue &req) {
     // cout << "cmd : " << cmd << endl;
 
     if(cmd == "MULTI") {
-        inTransaction = true;
+        state.inTransaction = true;
         return {"OK", '+'};
     }
 
@@ -83,16 +89,17 @@ RESPValue RequestHandler::handle(const RESPValue &req) {
     }
 
     if(cmd == "DISCARD") {
-        if(!inTransaction)
+        if(!state.inTransaction)
             return {"ERR DISCARD without MULTI", '-'};
 
-        queuedCommands.clear();
-        inTransaction = false;
+        state.queuedCommands.clear();
+        state.inTransaction = false;
+        state.watchedKeys.clear();
         return {"OK", '+'};
     }
 
-    if(inTransaction) {
-        queuedCommands.push_back(arr);
+    if(state.inTransaction && cmd != "WATCH") {
+        state.queuedCommands.push_back(arr);
         return {"QUEUED", '+'};
     }
 
@@ -135,6 +142,7 @@ RESPValue RequestHandler::handleSet(const RESPArray &arr) {
     }
 
     store.set(key, value, px);
+    store.markKeyAsModified(key);
 
     return {"OK", '+'};
 }
@@ -167,6 +175,7 @@ RESPValue RequestHandler::handleRpush(const RESPArray &arr) {
         if(size == -1)
             return {"WRONGTYPE Operation against a key holding the wrong kind of value", '-'};
     }
+    store.markKeyAsModified(key);
 
     return {size, ':'};
 }
@@ -185,6 +194,7 @@ RESPValue RequestHandler::handleLpush(const RESPArray &arr) {
         if(size == -1)
             return {"WRONGTYPE Operation against a key holding the wrong kind of value", '-'};
     }
+    store.markKeyAsModified(key);
 
     return {size, ':'};
 }
@@ -483,21 +493,39 @@ RESPValue RequestHandler::handleIncr(const RESPArray &arr) {
 }
 
 RESPValue RequestHandler::handleExec() {
-    if(!inTransaction)
+    if(!state.inTransaction)
         return {"ERR EXEC without MULTI", '-'};
 
     RESPArray responses;
 
-    auto commands = move(queuedCommands);
-    queuedCommands.clear();
-    inTransaction = false;
+    auto commands = move(state.queuedCommands);
+    state.queuedCommands.clear();
+    state.inTransaction = false;
+
+    bool watchedKeysModified = false;
+
+    for(auto &[key, version] : state.watchedKeys) {
+        auto currentVersion = store.getKeyVersion(key);
+        cout << key << ' ' << currentVersion << ' ' << version << endl;
+        if(currentVersion != version) {
+            cout << "Not Matched\n";
+            watchedKeysModified = true;
+            break;
+        }
+    }
+    state.watchedKeys.clear();
+
+    cout << "Watched keys modified : " << watchedKeysModified << endl;
+
+    if(watchedKeysModified) {
+        return {nullptr, '*'};
+    }
 
     for(auto &command : commands) {
         string cmd = get<string>(command[0].value);
         for(auto &e : cmd)
             e = toupper(e);
 
-        cout << "Executing : " << cmd << endl;
         RESPValue response;
         try {
             response = executeCommand(cmd, command);
@@ -512,4 +540,28 @@ RESPValue RequestHandler::handleExec() {
     }
 
     return {responses, '*'};
+}
+
+RESPValue RequestHandler::handleWatch(const RESPArray &arr) {
+    if(arr.size() < 2)
+        return {"ERR wrong number of arguments.", '-'};
+
+    if(state.inTransaction)
+        return {"ERR WATCH inside MULTI is not allowed", '-'};
+
+    for(int i = 1; i < arr.size(); i++) {
+        string key = get<string>(arr[i].value);
+        state.watchedKeys[key] = store.getKeyVersion(key);
+    }
+
+    return {"OK", '+'};
+}
+
+RESPValue RequestHandler::handleUnwatch(const RESPArray &arr) {
+    if(arr.size() != 1)
+        return {"ERR wrong number of arguments.", '-'};
+
+    state.watchedKeys.clear();
+
+    return {"OK", '+'};
 }

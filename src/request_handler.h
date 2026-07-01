@@ -1,6 +1,13 @@
 #pragma once
 #include "RESP/resp_parser.h"
 #include "store.h"
+#include <unordered_map>
+
+struct ClientState {
+    bool inTransaction = false;
+    vector<RESPArray> queuedCommands;
+    unordered_map<string, uint64_t> watchedKeys;
+};
 
 class RequestHandler{
 private:
@@ -9,8 +16,7 @@ private:
 public:
     RequestHandler(Store &store);
     RESPValue handle(const RESPValue &req);
-    bool inTransaction = false;
-    vector<RESPArray> queuedCommands;
+    ClientState state;
 
 private:
     RESPValue executeCommand(const string &cmd, const RESPArray &arr);
@@ -32,4 +38,7 @@ private:
     RESPValue handleXread(const RESPArray &arr);
     RESPValue handleIncr(const RESPArray &arr);
     RESPValue handleExec();
+
+    RESPValue handleWatch(const RESPArray &arr);
+    RESPValue handleUnwatch(const RESPArray &arr);
 };

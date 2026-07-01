@@ -298,6 +298,7 @@ optional<string> Store::lpop(const string &key) {
 
     const string front = list->front();
     list->pop_front();
+    markKeyAsModified(key);
 
     return front;
 }
@@ -320,6 +321,7 @@ optional<pair<string, string>> Store::blpop(const string &key, double timeoutSec
 
                 list->pop_front();
 
+                markKeyAsModified(key);
                 return {{key, val}};
             }
         }
@@ -341,8 +343,10 @@ optional<pair<string, string>> Store::blpop(const string &key, double timeoutSec
         });
     }
 
-    if(waiter->poppedValue.has_value())
+    if(waiter->poppedValue.has_value()) {
+        markKeyAsModified(key);
         return {{key, *waiter->poppedValue}};
+    }
 
     waiter->completed = true;
     return nullopt;
@@ -409,6 +413,7 @@ string Store::xadd(const string &streamKey, const string &entryId, const vector<
             throw runtime_error("ERR The ID specified in XADD is equal or smaller than the target stream top item");
     }
 
+    markKeyAsModified(streamKey);
     stream->push_back({newId, fields});
 
     while(!streamWaiting[streamKey].empty()) {
@@ -607,6 +612,14 @@ optional<vector<pair<string, StreamType>>> Store::xreadBlocking(const vector<pai
     return available;
 }
 
+void Store::markKeyAsModified(const string &key) {
+    keyVersion[key]++;
+}
+
+uint64_t Store::getKeyVersion(const string &key) {
+    return keyVersion[key];
+}
+
 optional<long long> Store::incr(const string &key) {
     lock_guard lock(storeMutex);
 
@@ -617,6 +630,7 @@ optional<long long> Store::incr(const string &key) {
         entry.value = "1";
         entry.expiry = nullopt;
 
+        markKeyAsModified(key);
         kv[key] = entry;
         return 1;
     }
@@ -635,6 +649,7 @@ optional<long long> Store::incr(const string &key) {
             throw runtime_error("ERR value is not an integer or out of range");
 
         *get_if<string>(&itr->second.value) = to_string(newValue);
+        markKeyAsModified(key);
         return newValue;
     } catch (const invalid_argument&) {
         return nullopt;
@@ -644,3 +659,4 @@ optional<long long> Store::incr(const string &key) {
 
     return nullopt;
 }
+

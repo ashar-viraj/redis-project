@@ -62,6 +62,7 @@ private:
     map<string, queue<shared_ptr<WaitingClient>>> waiting;
     map<string, deque<shared_ptr<StreamWaitingClient>>> streamWaiting;
     mutex storeMutex;
+    map<string, uint64_t> keyVersion;
 public:
     Iterator findValidKey(const string& key);
     void set(const string &key, const string &value, optional<long long> px);
@@ -79,4 +80,6 @@ public:
     optional<StreamType> xread(const string &key, const string &id);
     optional<vector<pair<string, StreamType>>> xreadBlocking(const vector<pair<string, string>> &streams, long long timeoutMs);
     optional<long long> incr(const string &key);
+    void markKeyAsModified(const string &key);
+    uint64_t getKeyVersion(const string &key);
 };
