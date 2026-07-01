@@ -49,9 +49,12 @@ void send_msg(const string &message, int client_fd)
 
 void recieve_msg(int client_fd,
                  RESPParser &parser,
-                 RequestHandler &handler,
+                 Store &store,
+                //  RequestHandler &handler,
                  RESPSerializer &serializer)
 {
+  RequestHandler handler(store);
+
   char buffer[MAX_BUFFER_LEN] = {0};
   const char *pong = "+PONG\r\n";
   while (true)
@@ -135,7 +138,7 @@ int main(int argc, char **argv)
   Store store;
 
   RESPParser parser;
-  RequestHandler handler(store);
+  
   RESPSerializer serializer;
 
   while (true)
@@ -147,7 +150,7 @@ int main(int argc, char **argv)
       continue;
     }
     // std::cout << "Client connected\n";
-    thread(recieve_msg, client_fd, ref(parser), ref(handler), ref(serializer)).detach();
+    thread(recieve_msg, client_fd, ref(parser), ref(store), ref(serializer)).detach();
 
     // recieve_msg(client_fd);
   }

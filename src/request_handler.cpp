@@ -7,23 +7,7 @@ using namespace std;
 
 RequestHandler::RequestHandler(Store &s) : store(s){}
 
-RESPValue RequestHandler::handle(const RESPValue &req) {
-    // cout << "Handling Request\n";
-    if(req.type != '*')
-        throw runtime_error("Command must be array");
-
-    RESPArray arr = get<RESPArray>(req.value);
-
-    if(arr.empty())
-        throw runtime_error("Empty command");
-
-    string cmd = get<string>(arr[0].value);
-
-    for(auto &e : cmd)
-        e = toupper(e);
-
-    // cout << "cmd : " << cmd << endl;
-
+RESPValue RequestHandler::executeCommand(const string &cmd, const RESPArray &arr) {
     if(cmd == "PING")
         return handlePing();
 
@@ -70,6 +54,49 @@ RESPValue RequestHandler::handle(const RESPValue &req) {
         return handleIncr(arr);
 
     return {"ERR unkown command", '-'};
+}
+
+RESPValue RequestHandler::handle(const RESPValue &req) {
+    // cout << "Handling Request\n";
+    if(req.type != '*')
+        throw runtime_error("Command must be array");
+
+    RESPArray arr = get<RESPArray>(req.value);
+
+    if(arr.empty())
+        throw runtime_error("Empty command");
+
+    string cmd = get<string>(arr[0].value);
+
+    for(auto &e : cmd)
+        e = toupper(e);
+
+    // cout << "cmd : " << cmd << endl;
+
+    if(cmd == "MULTI") {
+        inTransaction = true;
+        return {"OK", '+'};
+    }
+
+    if(cmd == "EXEC") {
+        return handleExec();
+    }
+
+    if(cmd == "DISCARD") {
+        if(!inTransaction)
+            return {"ERR DISCARD without MULTI", '-'};
+
+        queuedCommands.clear();
+        inTransaction = false;
+        return {"OK", '+'};
+    }
+
+    if(inTransaction) {
+        queuedCommands.push_back(arr);
+        return {"QUEUED", '+'};
+    }
+
+    return executeCommand(cmd, arr);
 }
 
 RESPValue RequestHandler::handlePing(){
@@ -453,4 +480,36 @@ RESPValue RequestHandler::handleIncr(const RESPArray &arr) {
     }
 
     return {*result, ':'};
+}
+
+RESPValue RequestHandler::handleExec() {
+    if(!inTransaction)
+        return {"ERR EXEC without MULTI", '-'};
+
+    RESPArray responses;
+
+    auto commands = move(queuedCommands);
+    queuedCommands.clear();
+    inTransaction = false;
+
+    for(auto &command : commands) {
+        string cmd = get<string>(command[0].value);
+        for(auto &e : cmd)
+            e = toupper(e);
+
+        cout << "Executing : " << cmd << endl;
+        RESPValue response;
+        try {
+            response = executeCommand(cmd, command);
+        }catch (const std::exception& e) {
+            cout << "Caught exception: " << e.what() << endl;
+            response = {e.what(), '-'};
+        }
+        catch (...) {
+            response = {"ERR internal error", '-'};
+        }
+        responses.push_back(response);
+    }
+
+    return {responses, '*'};
 }

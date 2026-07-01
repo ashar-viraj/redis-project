@@ -9,8 +9,12 @@ private:
 public:
     RequestHandler(Store &store);
     RESPValue handle(const RESPValue &req);
+    bool inTransaction = false;
+    vector<RESPArray> queuedCommands;
 
 private:
+    RESPValue executeCommand(const string &cmd, const RESPArray &arr);
+
     RESPValue handlePing();
     RESPValue handleEcho(const RESPArray &arr);
     RESPValue handleSet(const RESPArray &arr);
@@ -27,4 +31,5 @@ private:
     RESPValue handleXrange(const RESPArray &arr);
     RESPValue handleXread(const RESPArray &arr);
     RESPValue handleIncr(const RESPArray &arr);
+    RESPValue handleExec();
 };
