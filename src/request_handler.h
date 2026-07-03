@@ -1,6 +1,7 @@
 #pragma once
 #include "RESP/resp_parser.h"
 #include "store.h"
+#include "config.h"
 #include <unordered_map>
 
 struct ClientState {
@@ -9,12 +10,15 @@ struct ClientState {
     unordered_map<string, uint64_t> watchedKeys;
 };
 
+void toUpper(string &s);
+
 class RequestHandler{
 private:
     Store &store;
+    Config &config;
 
 public:
-    RequestHandler(Store &store);
+    RequestHandler(Store &store, Config &config);
     RESPValue handle(const RESPValue &req);
     ClientState state;
 
@@ -41,4 +45,8 @@ private:
 
     RESPValue handleWatch(const RESPArray &arr);
     RESPValue handleUnwatch(const RESPArray &arr);
+
+    RESPValue handleInfo(const RESPArray &arr);
+    RESPValue handleReplConf(const RESPArray &arr);
+    RESPValue handlePsync(const RESPArray &arr);
 };

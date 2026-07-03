@@ -5,7 +5,12 @@
 
 using namespace std;
 
-RequestHandler::RequestHandler(Store &s) : store(s){}
+void toUpper(string &s) {
+    for(auto &e : s)
+        e = toupper(e);
+}
+
+RequestHandler::RequestHandler(Store &s, Config &config) : store(s), config(config){}
 
 RESPValue RequestHandler::executeCommand(const string &cmd, const RESPArray &arr) {
     if(cmd == "PING")
@@ -59,6 +64,15 @@ RESPValue RequestHandler::executeCommand(const string &cmd, const RESPArray &arr
     if(cmd == "UNWATCH")
         return handleUnwatch(arr);
 
+    if(cmd == "INFO")
+        return handleInfo(arr);
+
+    if(cmd == "REPLCONF")
+        return handleReplConf(arr);
+
+    if(cmd == "PSYNC")
+        return handlePsync(arr);
+
     return {"ERR unkown command", '-'};
 }
 
@@ -73,9 +87,7 @@ RESPValue RequestHandler::handle(const RESPValue &req) {
         throw runtime_error("Empty command");
 
     string cmd = get<string>(arr[0].value);
-
-    for(auto &e : cmd)
-        e = toupper(e);
+    toUpper(cmd);
 
     // cout << "cmd : " << cmd << endl;
 
@@ -128,7 +140,7 @@ RESPValue RequestHandler::handleSet(const RESPArray &arr) {
 
     if(arr.size() == 5) {
         string option = get<string>(arr[3].value);
-        for(auto &e : option) e = toupper(e);
+        toUpper(option);
         try {
             if(option == "PX")
                 px = stoll(get<string>(arr[4].value));
@@ -255,14 +267,11 @@ RESPValue RequestHandler::handleLpop(const RESPArray &arr) {
 
         RESPArray result;
 
-        cout << "Count :" << count << endl;
         while(count--) {
             poppedValue = store.lpop(key);
 
-            if(!poppedValue) {
-                cout << "Not found\n";
+            if(!poppedValue)
                 break;
-            }
 
             result.push_back({poppedValue.value(), '$'});
         }
@@ -374,8 +383,7 @@ RESPValue RequestHandler::handleXread(const RESPArray &arr) {
     int streamsIdx = 1;
 
     string firstKeyword = get<string>(arr[1].value);
-    for(auto &ch : firstKeyword)
-        ch = toupper(ch);
+    toUpper(firstKeyword);
 
     if(firstKeyword == "BLOCK") {
         if(arr.size() < 6)
@@ -396,8 +404,7 @@ RESPValue RequestHandler::handleXread(const RESPArray &arr) {
     }
 
     string keyword = get<string>(arr[streamsIdx].value);
-    for(auto &ch : keyword)
-        ch = toupper(ch);
+    toUpper(keyword);
 
     if(keyword != "STREAMS")
         return {"ERR syntax error", '-'};
@@ -506,16 +513,12 @@ RESPValue RequestHandler::handleExec() {
 
     for(auto &[key, version] : state.watchedKeys) {
         auto currentVersion = store.getKeyVersion(key);
-        cout << key << ' ' << currentVersion << ' ' << version << endl;
         if(currentVersion != version) {
-            cout << "Not Matched\n";
             watchedKeysModified = true;
             break;
         }
     }
     state.watchedKeys.clear();
-
-    cout << "Watched keys modified : " << watchedKeysModified << endl;
 
     if(watchedKeysModified) {
         return {nullptr, '*'};
@@ -523,14 +526,12 @@ RESPValue RequestHandler::handleExec() {
 
     for(auto &command : commands) {
         string cmd = get<string>(command[0].value);
-        for(auto &e : cmd)
-            e = toupper(e);
+        toUpper(cmd);
 
         RESPValue response;
         try {
             response = executeCommand(cmd, command);
         }catch (const std::exception& e) {
-            cout << "Caught exception: " << e.what() << endl;
             response = {e.what(), '-'};
         }
         catch (...) {
@@ -561,7 +562,36 @@ RESPValue RequestHandler::handleUnwatch(const RESPArray &arr) {
     if(arr.size() != 1)
         return {"ERR wrong number of arguments.", '-'};
 
-    state.watchedKeys.clear();
+        state.watchedKeys.clear();
 
     return {"OK", '+'};
+}
+
+RESPValue RequestHandler::handleInfo(const RESPArray &arr)
+{
+    if (arr.size() != 2)
+        return {"ERR wrong number of arguments.", '-'};
+
+    string option = get<string>(arr[1].value);
+    toUpper(option);
+
+    if (option == "REPLICATION")
+    {
+        string info = config.isReplica ? "role:slave\n" : "role:master\n";
+        info += "master_replid:8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb\n";
+        info += "master_repl_offset:0";
+        return {info, '$'};
+    }
+
+    return {"OK", '+'};
+}
+
+RESPValue RequestHandler::handleReplConf(const RESPArray &arr) {
+    return {"OK", '+'};
+}
+
+RESPValue RequestHandler::handlePsync(const RESPArray &arr) {
+    string reply = "FULLRESYNC " + config.masterReplId + " " + to_string(config.masterReplOffset);
+
+    return {reply, '+'};
 }

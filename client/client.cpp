@@ -216,7 +216,7 @@ static void printPretty(const RespValue &v, int indent = 0)
     switch (v.type)
     {
         case RespValue::SIMPLE:
-            std::cout << "\"" << v.text << "\"";
+            std::cout << v.text;
             break;
 
         case RespValue::ERROR:
@@ -228,7 +228,7 @@ static void printPretty(const RespValue &v, int indent = 0)
             break;
 
         case RespValue::BULK:
-            std::cout << "\"" << v.text << "\"";
+            std::cout << v.text;
             break;
 
         case RespValue::NIL:

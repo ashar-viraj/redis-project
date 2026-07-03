@@ -13,6 +13,20 @@ struct RESPValue
 {
     variant<string, long long, RESPArray, nullptr_t> value;
     char type;
+
+    RESPValue(){}
+
+    RESPValue(const string& v, char t)
+        : value(v), type(t) {}
+
+    RESPValue(long long v, char t)
+        : value(v), type(t) {}
+
+    RESPValue(const RESPArray& v, char t)
+        : value(v), type(t) {}
+
+    RESPValue(nullptr_t v, char t)
+        : value(v), type(t) {}
 };
 
 class RESPParser
