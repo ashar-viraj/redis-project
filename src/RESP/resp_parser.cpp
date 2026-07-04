@@ -24,6 +24,8 @@ RESPValue RESPParser::parse(char buffer[])
 
 RESPValue RESPParser::parseValue(const string &buffer, int &idx)
 {
+    if(idx >= buffer.size())
+        throw runtime_error("Incomplete RESP message");
     switch (buffer[idx])
     {
     case '+':

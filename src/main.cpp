@@ -10,15 +10,31 @@
 #include <thread>
 #include <vector>
 #include <cerrno>
+#include <csignal>
 
 #include "RESP/resp_parser.h"
 #include "request_handler.h"
 #include "RESP/resp_serializer.h"
 #include "config.h"
+#include "empty_rdb.h"
 
 using namespace std;
 
 #define MAX_BUFFER_LEN 1024
+
+
+string escapeRESP(const string &s) {
+    string out;
+    for (char c : s) {
+        if (c == '\r')
+            out += "\\r";
+        else if (c == '\n')
+            out += "\\n\n";
+        else
+            out += c;
+    }
+    return out;
+}
 
 // Important
 void send_msg(const string &message, int client_fd) {
@@ -29,7 +45,7 @@ void send_msg(const string &message, int client_fd) {
         client_fd,
         message.data() + total_sent,
         message.size() - total_sent,
-        0);
+        MSG_NOSIGNAL);
 
     if (byte_sent == -1)
     {
@@ -51,6 +67,7 @@ string receive_msg(int sock_fd) {
   char buffer[1024] = {0};
 
   int len = recv(sock_fd, buffer, sizeof(buffer)-1, 0);
+
   if(len <= 0)
     return "";
 
@@ -77,35 +94,35 @@ void handleClient(int client_fd,
     buffer[msg_len] = '\0';
 
     string resStr;
+    bool sendRdb = false;
     try{
       RESPValue req = parser.parse(buffer);
 
+      RESPArray arr = get<RESPArray>(req.value);
+      if(!arr.empty()) {
+        string cmd = get<string>(arr[0].value);
+        toUpper(cmd);
+
+        sendRdb = (!config.isReplica && cmd == "PSYNC");
+      }
+
       RESPValue res = handler.handle(req);
-
       resStr = serializer.serialize(res);
-
     } catch (const exception &e) {
       resStr = "-" + string(e.what()) + "\r\n";
     }catch(...) {
       resStr = "-ERR unknown error\r\n";
     }
     send_msg(resStr, client_fd);
+
+    if(sendRdb) {
+      string rdb = getEmptyRdb();
+      send_msg("$" + to_string(rdb.size()) + "\r\n", client_fd);
+      send_msg(rdb, client_fd);
+    }
   }
 
   close(client_fd);
-}
-
-string escapeRESP(const string &s) {
-    string out;
-    for (char c : s) {
-        if (c == '\r')
-            out += "\\r";
-        else if (c == '\n')
-            out += "\\n\n";
-        else
-            out += c;
-    }
-    return out;
 }
 
 bool connectToMaster(Config &config, RESPSerializer &serializer) {
@@ -196,6 +213,7 @@ int main(int argc, char **argv)
   // Flush after every std::cout / std::cerr
   std::cout << std::unitbuf;
   std::cerr << std::unitbuf;
+  signal(SIGPIPE, SIG_IGN);
 
   Config config;
 

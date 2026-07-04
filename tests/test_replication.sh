@@ -377,6 +377,7 @@ run_master_handshake_client() {
 
     python3 - "$port" "$replica_port" "$output_file" <<'PY'
 import re
+import select
 import socket
 import sys
 
@@ -401,6 +402,35 @@ def read_line(sock):
             break
         data.extend(chunk)
     return bytes(data)
+
+def read_exact(sock, size):
+    data = bytearray()
+    while len(data) < size:
+        chunk = sock.recv(size - len(data))
+        if not chunk:
+            raise EOFError("connection closed while reading %d bytes" % size)
+        data.extend(chunk)
+    return bytes(data)
+
+def read_optional_rdb(sock):
+    readable, _, _ = select.select([sock], [], [], 0.25)
+    if not readable:
+        return None
+
+    prefix = read_exact(sock, 1)
+    if prefix != b"$":
+        raise ValueError("expected RDB bulk prefix '$', got %r" % prefix)
+
+    length_line = read_line(sock)
+    try:
+        length = int(length_line[:-2])
+    except ValueError as exc:
+        raise ValueError("invalid RDB length line %r" % length_line) from exc
+
+    if length <= 0:
+        raise ValueError("RDB length must be positive, got %d" % length)
+
+    return read_exact(sock, length)
 
 lines = []
 
@@ -437,12 +467,164 @@ try:
             lines.append("ERROR expected FULLRESYNC with 40-character replid and offset 0")
             raise SystemExit(3)
 
+        rdb = read_optional_rdb(sock)
+        if rdb is None:
+            lines.append("RDB after PSYNC => none")
+        else:
+            lines.append("RDB after PSYNC => %d bytes" % len(rdb))
+
         sock.sendall(resp_array("PING"))
         response = read_line(sock)
         lines.append("PING after PSYNC => %r" % (response,))
         if response != b"+PONG\r\n":
             lines.append("ERROR connection did not stay usable after PSYNC")
             raise SystemExit(4)
+except Exception as exc:
+    lines.append("ERROR %s" % exc)
+    raise
+finally:
+    with open(output_file, "w", encoding="utf-8") as f:
+        for line in lines:
+            f.write(line + "\n")
+PY
+}
+
+run_empty_rdb_transfer_client() {
+    local port="$1" replica_port="$2" output_file="$3"
+
+    python3 - "$port" "$replica_port" "$output_file" <<'PY'
+import re
+import select
+import socket
+import sys
+
+port = int(sys.argv[1])
+replica_port = sys.argv[2]
+output_file = sys.argv[3]
+
+def resp_array(*args):
+    out = bytearray()
+    out.extend(("*%d\r\n" % len(args)).encode("ascii"))
+    for arg in args:
+        data = str(arg).encode("utf-8")
+        out.extend(("$%d\r\n" % len(data)).encode("ascii"))
+        out.extend(data + b"\r\n")
+    return bytes(out)
+
+def read_exact(sock, size):
+    data = bytearray()
+    while len(data) < size:
+        chunk = sock.recv(size - len(data))
+        if not chunk:
+            raise EOFError("connection closed while reading %d bytes" % size)
+        data.extend(chunk)
+    return bytes(data)
+
+def read_line(sock):
+    data = bytearray()
+    while not data.endswith(b"\r\n"):
+        chunk = sock.recv(1)
+        if not chunk:
+            raise EOFError("connection closed while reading line")
+        data.extend(chunk)
+    return bytes(data)
+
+def read_rdb_bulk(sock):
+    prefix = read_exact(sock, 1)
+    if prefix != b"$":
+        raise ValueError("expected RDB bulk prefix '$', got %r" % prefix)
+
+    length_line = read_line(sock)
+    try:
+        length = int(length_line[:-2])
+    except ValueError as exc:
+        raise ValueError("invalid RDB length line %r" % length_line) from exc
+
+    if length <= 0:
+        raise ValueError("RDB length must be positive, got %d" % length)
+
+    payload = read_exact(sock, length)
+    return length, payload
+
+lines = []
+
+try:
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+        sock.settimeout(5)
+
+        steps = [
+            ("PING", resp_array("PING"), b"+PONG\r\n"),
+            (
+                "REPLCONF listening-port",
+                resp_array("REPLCONF", "listening-port", replica_port),
+                b"+OK\r\n",
+            ),
+            (
+                "REPLCONF capa eof capa psync2",
+                resp_array("REPLCONF", "capa", "eof", "capa", "psync2"),
+                b"+OK\r\n",
+            ),
+        ]
+
+        for label, request, expected in steps:
+            sock.sendall(request)
+            response = read_line(sock)
+            lines.append("%s => %r" % (label, response))
+            if response != expected:
+                lines.append("ERROR expected %r" % (expected,))
+                raise SystemExit(2)
+
+        sock.sendall(resp_array("PSYNC", "?", "-1"))
+        fullresync = read_line(sock)
+        lines.append("PSYNC ? -1 => %r" % (fullresync,))
+        if not re.fullmatch(rb"\+FULLRESYNC [A-Za-z0-9]{40} 0\r\n", fullresync):
+            lines.append("ERROR expected FULLRESYNC with 40-character replid and offset 0")
+            raise SystemExit(3)
+
+        length, payload = read_rdb_bulk(sock)
+        lines.append("RDB_LENGTH %d" % length)
+        lines.append("RDB_MAGIC %r" % payload[:9])
+        lines.append("RDB_HEX_PREFIX %s" % payload[:16].hex())
+        lines.append("RDB_HEX_SUFFIX %s" % payload[-16:].hex())
+
+        if len(payload) != length:
+            lines.append("ERROR RDB payload length mismatch")
+            raise SystemExit(4)
+
+        if not re.fullmatch(rb"REDIS[0-9]{4}", payload[:9]):
+            lines.append("ERROR RDB payload does not start with REDIS version header")
+            raise SystemExit(5)
+
+        lines.append("RDB_MAGIC_OK yes")
+
+        eof_candidates = [
+            index for index, byte in enumerate(payload)
+            if byte == 0xFF and len(payload) - index >= 9
+        ]
+        if not eof_candidates:
+            lines.append("ERROR RDB payload does not contain EOF marker 0xff followed by an 8-byte checksum")
+            raise SystemExit(7)
+
+        eof_index = eof_candidates[0]
+        if b"\xfe" in payload[9:eof_index]:
+            lines.append("ERROR RDB payload contains a SELECTDB opcode before EOF; expected an empty database snapshot")
+            raise SystemExit(8)
+
+        lines.append("RDB_HAS_EOF yes")
+        lines.append("RDB_IS_EMPTY yes")
+
+        readable, _, _ = select.select([sock], [], [], 0.2)
+        if readable:
+            extra = sock.recv(2, socket.MSG_PEEK)
+            if extra == b"":
+                lines.append("RDB_TRAILING_BYTES none")
+            else:
+                lines.append("RDB_TRAILING_BYTES %r" % (extra,))
+            if extra == b"\r\n":
+                lines.append("ERROR RDB bulk payload must not be followed by RESP bulk-string CRLF")
+                raise SystemExit(8)
+        else:
+            lines.append("RDB_TRAILING_BYTES none")
 except Exception as exc:
     lines.append("ERROR %s" % exc)
     raise
@@ -683,6 +865,34 @@ if start_redis "$inbound_master_port" "$inbound_log" --port "$inbound_master_por
     check_equals "Master remains usable after handshake tests" "$response" "$(printf '+PONG\r')"
 
     stop_process "$inbound_master_pid"
+fi
+
+# ---------------------------------------------------------------------------
+# 10. Empty RDB transfer after FULLRESYNC
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- Empty RDB transfer ---"
+
+rdb_master_port=$(get_free_port)
+rdb_log="$TMPDIR_LOCAL/rdb_master.log"
+rdb_client_output="$TMPDIR_LOCAL/rdb_client.out"
+
+if start_redis "$rdb_master_port" "$rdb_log" --port "$rdb_master_port"; then
+    rdb_master_pid="$LAST_SERVER_PID"
+
+    if run_empty_rdb_transfer_client "$rdb_master_port" "$rdb_master_port" "$rdb_client_output"; then
+        record_pass "Master sends an empty RDB bulk payload after FULLRESYNC"
+        check_file_contains_line "RDB transfer used REPLCONF capa eof capa psync2" "$rdb_client_output" "REPLCONF capa eof capa psync2 => b'+OK\\r\\n'"
+        check_file_contains_line "RDB payload has a Redis RDB header" "$rdb_client_output" "RDB_MAGIC_OK yes"
+        check_file_contains_line "RDB payload contains EOF marker and checksum area" "$rdb_client_output" "RDB_HAS_EOF yes"
+        check_file_contains_line "RDB payload represents an empty database snapshot" "$rdb_client_output" "RDB_IS_EMPTY yes"
+        check_file_contains_line "RDB payload is not followed by bulk-string CRLF" "$rdb_client_output" "RDB_TRAILING_BYTES none"
+    else
+        record_fail "Master sends an empty RDB bulk payload after FULLRESYNC"
+        sed 's/^/    /' "$rdb_client_output" 2>/dev/null || true
+    fi
+
+    stop_process "$rdb_master_pid"
 fi
 
 echo ""
