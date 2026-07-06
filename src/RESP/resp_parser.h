@@ -32,7 +32,7 @@ struct RESPValue
 class RESPParser
 {
 public:
-    RESPValue parse(char buffer[]);
+    RESPValue parse(const string &buffer, size_t &bytesConsumed);
 
 private:
     RESPValue parseValue(const string &buffer, int &idx);

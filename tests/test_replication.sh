@@ -218,6 +218,19 @@ wait_for_port() {
     return 1
 }
 
+wait_for_file_line() {
+    local file="$1" line="$2" attempts="${3:-80}" i
+
+    for i in $(seq 1 "$attempts"); do
+        if grep -Fxq "$line" "$file" 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.1
+    done
+
+    return 1
+}
+
 stop_process() {
     local pid="$1"
 
@@ -368,6 +381,157 @@ PY
     done
 
     record_fail "Fake master started on port $port"
+    fail "  timed out waiting for fake master to listen"
+    return 1
+}
+
+start_fake_master_for_replica_processing() {
+    local port="$1" capture_file="$2"
+
+    python3 - "$port" "$capture_file" <<'PY' &
+import select
+import socket
+import sys
+import time
+
+port = int(sys.argv[1])
+capture_file = sys.argv[2]
+repl_id = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb"
+empty_rdb = bytes.fromhex(
+    "524544495330303131"
+    "fa0972656469732d766572"
+    "05372e322e30"
+    "fa0a72656469732d62697473"
+    "c040"
+    "fa056374696d65"
+    "c26d08bc65"
+    "fa08757365642d6d656d"
+    "c2b0c41000"
+    "fa08616f662d62617365"
+    "c000"
+    "fff06e3bfec0ff5aa2"
+)
+
+def emit(line):
+    with open(capture_file, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+        f.flush()
+
+def resp_array(*args):
+    out = bytearray()
+    out.extend(("*%d\r\n" % len(args)).encode("ascii"))
+    for arg in args:
+        data = str(arg).encode("utf-8")
+        out.extend(("$%d\r\n" % len(data)).encode("ascii"))
+        out.extend(data + b"\r\n")
+    return bytes(out)
+
+def read_line(conn):
+    data = bytearray()
+    while not data.endswith(b"\r\n"):
+        chunk = conn.recv(1)
+        if not chunk:
+            raise EOFError("connection closed while reading line")
+        data.extend(chunk)
+    return bytes(data)
+
+def read_resp_array(conn):
+    first = read_line(conn)
+    if not first.startswith(b"*"):
+        raise ValueError("expected RESP array, got %r" % first)
+
+    count = int(first[1:-2])
+    values = []
+    for _ in range(count):
+        header = read_line(conn)
+        if not header.startswith(b"$"):
+            raise ValueError("expected bulk string, got %r" % header)
+
+        size = int(header[1:-2])
+        payload = bytearray()
+        while len(payload) < size + 2:
+            chunk = conn.recv(size + 2 - len(payload))
+            if not chunk:
+                raise EOFError("connection closed while reading bulk string")
+            payload.extend(chunk)
+
+        if not payload.endswith(b"\r\n"):
+            raise ValueError("bulk string missing CRLF")
+        values.append(bytes(payload[:-2]).decode("utf-8", "replace"))
+
+    return values
+
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", port))
+    server.listen(1)
+    server.settimeout(8)
+    emit("LISTENING %d" % port)
+
+    try:
+        conn, addr = server.accept()
+    except socket.timeout:
+        emit("ERROR accept timeout")
+        sys.exit(2)
+
+    with conn:
+        emit("CONNECTED %s:%d" % addr)
+        conn.settimeout(8)
+
+        handshake_responses = [
+            b"+PONG\r\n",
+            b"+OK\r\n",
+            b"+OK\r\n",
+        ]
+
+        for index, response in enumerate(handshake_responses, start=1):
+            values = read_resp_array(conn)
+            emit("CMD %d %s" % (index, " ".join(values)))
+            conn.sendall(response)
+
+        values = read_resp_array(conn)
+        emit("CMD 4 %s" % " ".join(values))
+        conn.sendall(("+FULLRESYNC %s 0\r\n" % repl_id).encode("ascii"))
+        conn.sendall(("$%d\r\n" % len(empty_rdb)).encode("ascii"))
+        conn.sendall(empty_rdb)
+        emit("RDB_SENT %d" % len(empty_rdb))
+
+        time.sleep(0.2)
+        conn.sendall(resp_array("SET", "foo", "1"))
+        time.sleep(0.1)
+        conn.sendall(
+            resp_array("SET", "bar", "2") +
+            resp_array("SET", "baz", "3") +
+            resp_array("SET", "pipe:one", "alpha") +
+            resp_array("SET", "pipe:two", "beta")
+        )
+        emit("PROPAGATION_SENT")
+
+        readable, _, _ = select.select([conn], [], [], 0.8)
+        if readable:
+            data = conn.recv(1024)
+            emit("REPLICA_RESPONSE_AFTER_PROPAGATION %r" % data)
+        else:
+            emit("NO_RESPONSE_AFTER_PROPAGATION")
+
+        time.sleep(4)
+PY
+    LAST_FAKE_MASTER_PID=$!
+    FAKE_MASTER_PIDS+=("$LAST_FAKE_MASTER_PID")
+
+    for _ in $(seq 1 60); do
+        if grep -Fxq "LISTENING $port" "$capture_file" 2>/dev/null; then
+            return 0
+        fi
+        if ! kill -0 "$LAST_FAKE_MASTER_PID" 2>/dev/null; then
+            record_fail "Replica-processing fake master started on port $port"
+            sed 's/^/    /' "$capture_file" 2>/dev/null || true
+            return 1
+        fi
+        sleep 0.1
+    done
+
+    record_fail "Replica-processing fake master started on port $port"
     fail "  timed out waiting for fake master to listen"
     return 1
 }
@@ -635,6 +799,413 @@ finally:
 PY
 }
 
+run_single_replica_propagation_client() {
+    local port="$1" replica_port="$2" output_file="$3"
+
+    python3 - "$port" "$replica_port" "$output_file" <<'PY'
+import json
+import re
+import select
+import socket
+import sys
+
+port = int(sys.argv[1])
+replica_port = sys.argv[2]
+output_file = sys.argv[3]
+
+def resp_array(*args):
+    out = bytearray()
+    out.extend(("*%d\r\n" % len(args)).encode("ascii"))
+    for arg in args:
+        data = str(arg).encode("utf-8")
+        out.extend(("$%d\r\n" % len(data)).encode("ascii"))
+        out.extend(data + b"\r\n")
+    return bytes(out)
+
+def read_exact(sock, size):
+    data = bytearray()
+    while len(data) < size:
+        chunk = sock.recv(size - len(data))
+        if not chunk:
+            raise EOFError("connection closed while reading %d bytes" % size)
+        data.extend(chunk)
+    return bytes(data)
+
+def read_line(sock):
+    data = bytearray()
+    while not data.endswith(b"\r\n"):
+        chunk = sock.recv(1)
+        if not chunk:
+            raise EOFError("connection closed while reading line")
+        data.extend(chunk)
+    return bytes(data)
+
+def read_bulk_string(sock):
+    header = read_line(sock)
+    if not header.startswith(b"$"):
+        raise ValueError("expected bulk string, got %r" % header)
+
+    length = int(header[1:-2])
+    payload = read_exact(sock, length + 2)
+    if not payload.endswith(b"\r\n"):
+        raise ValueError("bulk string missing trailing CRLF")
+    return payload[:-2].decode("utf-8", "replace")
+
+def read_resp_array(sock):
+    first = read_line(sock)
+    if not first.startswith(b"*"):
+        raise ValueError("expected propagated RESP array, got %r" % first)
+
+    count = int(first[1:-2])
+    values = []
+    for _ in range(count):
+        values.append(read_bulk_string(sock))
+    return values
+
+def read_resp_reply(sock):
+    first = read_line(sock)
+    if first.startswith(b"$"):
+        length = int(first[1:-2])
+        if length == -1:
+            return first
+        return first + read_exact(sock, length + 2)
+    return first
+
+def read_rdb_bulk(sock):
+    prefix = read_exact(sock, 1)
+    if prefix != b"$":
+        raise ValueError("expected RDB bulk prefix '$', got %r" % prefix)
+
+    length_line = read_line(sock)
+    length = int(length_line[:-2])
+    if length <= 0:
+        raise ValueError("RDB length must be positive, got %d" % length)
+
+    payload = read_exact(sock, length)
+    if not re.fullmatch(rb"REDIS[0-9]{4}", payload[:9]):
+        raise ValueError("RDB payload does not start with REDIS version header")
+    return payload
+
+def send_client_command(*args):
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
+        client.settimeout(5)
+        client.sendall(resp_array(*args))
+        return read_resp_reply(client)
+
+def expect_no_propagation(replica, label):
+    readable, _, _ = select.select([replica], [], [], 0.35)
+    if readable:
+        values = read_resp_array(replica)
+        raise AssertionError("%s unexpectedly propagated %s" % (label, values))
+    lines.append("NO_PROPAGATION %s" % label)
+
+def expect_propagated(replica, expected, index):
+    readable, _, _ = select.select([replica], [], [], 3)
+    if not readable:
+        raise TimeoutError("timed out waiting for propagated command %d: %s" % (index, expected))
+
+    values = read_resp_array(replica)
+    lines.append("PROPAGATED %d %s" % (index, json.dumps(values)))
+    if values != list(expected):
+        raise AssertionError("expected propagated command %s, got %s" % (expected, values))
+
+lines = []
+
+try:
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as replica:
+        replica.settimeout(5)
+
+        handshake = [
+            ("PING", resp_array("PING"), b"+PONG\r\n"),
+            (
+                "REPLCONF listening-port",
+                resp_array("REPLCONF", "listening-port", replica_port),
+                b"+OK\r\n",
+            ),
+            (
+                "REPLCONF capa eof capa psync2",
+                resp_array("REPLCONF", "capa", "eof", "capa", "psync2"),
+                b"+OK\r\n",
+            ),
+        ]
+
+        for label, request, expected in handshake:
+            replica.sendall(request)
+            response = read_line(replica)
+            lines.append("%s => %r" % (label, response))
+            if response != expected:
+                raise AssertionError("%s expected %r, got %r" % (label, expected, response))
+
+        replica.sendall(resp_array("PSYNC", "?", "-1"))
+        fullresync = read_line(replica)
+        lines.append("PSYNC ? -1 => %r" % (fullresync,))
+        if not re.fullmatch(rb"\+FULLRESYNC [A-Za-z0-9]{40} 0\r\n", fullresync):
+            raise AssertionError("expected FULLRESYNC, got %r" % fullresync)
+
+        rdb = read_rdb_bulk(replica)
+        lines.append("RDB_READY %d" % len(rdb))
+
+        response = send_client_command("PING")
+        lines.append("CLIENT PING => %r" % response)
+        if response != b"+PONG\r\n":
+            raise AssertionError("PING client expected +PONG, got %r" % response)
+        expect_no_propagation(replica, "PING")
+
+        response = send_client_command("ECHO", "not-a-write")
+        lines.append("CLIENT ECHO => %r" % response)
+        if response != b"$11\r\nnot-a-write\r\n":
+            raise AssertionError("ECHO client got unexpected response %r" % response)
+        expect_no_propagation(replica, "ECHO")
+
+        writes = [
+            ("SET", "foo", "1"),
+            ("SET", "bar", "2"),
+            ("SET", "baz", "3"),
+            ("SET", "prop:space", "two words"),
+            ("SET", "prop:empty", ""),
+        ]
+
+        for index, command in enumerate(writes, start=1):
+            response = send_client_command(*command)
+            lines.append("CLIENT %s => %r" % (" ".join(command), response))
+            if response != b"+OK\r\n":
+                raise AssertionError("write client expected +OK for %s, got %r" % (command, response))
+            expect_propagated(replica, command, index)
+
+        response = send_client_command("GET", "foo")
+        lines.append("CLIENT GET foo => %r" % response)
+        if response != b"$1\r\n1\r\n":
+            raise AssertionError("GET client expected foo=1, got %r" % response)
+        expect_no_propagation(replica, "GET")
+except Exception as exc:
+    lines.append("ERROR %s" % exc)
+    raise
+finally:
+    with open(output_file, "w", encoding="utf-8") as f:
+        for line in lines:
+            f.write(line + "\n")
+PY
+}
+
+run_multi_replica_propagation_client() {
+    local port="$1" replica_port="$2" output_file="$3"
+
+    python3 - "$port" "$replica_port" "$output_file" <<'PY'
+import json
+import re
+import select
+import socket
+import sys
+
+port = int(sys.argv[1])
+replica_port = sys.argv[2]
+output_file = sys.argv[3]
+replica_count = 3
+
+def resp_array(*args):
+    out = bytearray()
+    out.extend(("*%d\r\n" % len(args)).encode("ascii"))
+    for arg in args:
+        data = str(arg).encode("utf-8")
+        out.extend(("$%d\r\n" % len(data)).encode("ascii"))
+        out.extend(data + b"\r\n")
+    return bytes(out)
+
+def read_exact(sock, size):
+    data = bytearray()
+    while len(data) < size:
+        chunk = sock.recv(size - len(data))
+        if not chunk:
+            raise EOFError("connection closed while reading %d bytes" % size)
+        data.extend(chunk)
+    return bytes(data)
+
+def read_line(sock):
+    data = bytearray()
+    while not data.endswith(b"\r\n"):
+        chunk = sock.recv(1)
+        if not chunk:
+            raise EOFError("connection closed while reading line")
+        data.extend(chunk)
+    return bytes(data)
+
+def read_bulk_string(sock):
+    header = read_line(sock)
+    if not header.startswith(b"$"):
+        raise ValueError("expected bulk string, got %r" % header)
+
+    length = int(header[1:-2])
+    payload = read_exact(sock, length + 2)
+    if not payload.endswith(b"\r\n"):
+        raise ValueError("bulk string missing trailing CRLF")
+    return payload[:-2].decode("utf-8", "replace")
+
+def read_resp_array(sock):
+    first = read_line(sock)
+    if not first.startswith(b"*"):
+        raise ValueError("expected propagated RESP array, got %r" % first)
+
+    count = int(first[1:-2])
+    values = []
+    for _ in range(count):
+        values.append(read_bulk_string(sock))
+    return values
+
+def read_resp_reply(sock):
+    first = read_line(sock)
+    if first.startswith(b"$"):
+        length = int(first[1:-2])
+        if length == -1:
+            return first
+        return first + read_exact(sock, length + 2)
+    return first
+
+def read_rdb_bulk(sock):
+    prefix = read_exact(sock, 1)
+    if prefix != b"$":
+        raise ValueError("expected RDB bulk prefix '$', got %r" % prefix)
+
+    length_line = read_line(sock)
+    length = int(length_line[:-2])
+    if length <= 0:
+        raise ValueError("RDB length must be positive, got %d" % length)
+
+    payload = read_exact(sock, length)
+    if not re.fullmatch(rb"REDIS[0-9]{4}", payload[:9]):
+        raise ValueError("RDB payload does not start with REDIS version header")
+    return payload
+
+def send_client_command(*args):
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
+        client.settimeout(5)
+        client.sendall(resp_array(*args))
+        return read_resp_reply(client)
+
+def connect_replica(replica_index):
+    replica = socket.create_connection(("127.0.0.1", port), timeout=5)
+    replica.settimeout(5)
+
+    fake_listening_port = str(30000 + replica_index)
+    handshake = [
+        ("PING", resp_array("PING"), b"+PONG\r\n"),
+        (
+            "REPLCONF listening-port",
+            resp_array("REPLCONF", "listening-port", fake_listening_port),
+            b"+OK\r\n",
+        ),
+        (
+            "REPLCONF capa eof capa psync2",
+            resp_array("REPLCONF", "capa", "eof", "capa", "psync2"),
+            b"+OK\r\n",
+        ),
+    ]
+
+    for label, request, expected in handshake:
+        replica.sendall(request)
+        response = read_line(replica)
+        lines.append("REPLICA %d %s => %r" % (replica_index, label, response))
+        if response != expected:
+            raise AssertionError("replica %d %s expected %r, got %r" % (
+                replica_index,
+                label,
+                expected,
+                response,
+            ))
+
+    replica.sendall(resp_array("PSYNC", "?", "-1"))
+    fullresync = read_line(replica)
+    lines.append("REPLICA %d PSYNC ? -1 => %r" % (replica_index, fullresync))
+    if not re.fullmatch(rb"\+FULLRESYNC [A-Za-z0-9]{40} 0\r\n", fullresync):
+        raise AssertionError("replica %d expected FULLRESYNC, got %r" % (replica_index, fullresync))
+
+    rdb = read_rdb_bulk(replica)
+    lines.append("REPLICA %d READY" % replica_index)
+    lines.append("REPLICA %d READY_BYTES %d" % (replica_index, len(rdb)))
+    return replica
+
+def expect_no_propagation_all(replicas, label):
+    for replica_index, replica in enumerate(replicas, start=1):
+        readable, _, _ = select.select([replica], [], [], 0.35)
+        if readable:
+            values = read_resp_array(replica)
+            raise AssertionError("%s unexpectedly propagated to replica %d: %s" % (
+                label,
+                replica_index,
+                values,
+            ))
+    lines.append("NO_PROPAGATION_ALL %s" % label)
+
+def expect_propagated_all(replicas, expected, command_index):
+    for replica_index, replica in enumerate(replicas, start=1):
+        readable, _, _ = select.select([replica], [], [], 3)
+        if not readable:
+            raise TimeoutError(
+                "timed out waiting for command %d on replica %d: %s" %
+                (command_index, replica_index, expected)
+            )
+
+        values = read_resp_array(replica)
+        lines.append("REPLICA %d PROPAGATED %d %s" % (
+            replica_index,
+            command_index,
+            json.dumps(values),
+        ))
+        if values != list(expected):
+            raise AssertionError(
+                "replica %d expected propagated command %s, got %s" %
+                (replica_index, expected, values)
+            )
+
+lines = []
+replicas = []
+
+try:
+    for replica_index in range(1, replica_count + 1):
+        replicas.append(connect_replica(replica_index))
+
+    response = send_client_command("PING")
+    lines.append("CLIENT PING => %r" % response)
+    if response != b"+PONG\r\n":
+        raise AssertionError("PING client expected +PONG, got %r" % response)
+    expect_no_propagation_all(replicas, "PING")
+
+    writes = [
+        ("SET", "foo", "1"),
+        ("SET", "bar", "2"),
+        ("SET", "baz", "3"),
+        ("SET", "multi:space", "two words"),
+    ]
+
+    for command_index, command in enumerate(writes, start=1):
+        response = send_client_command(*command)
+        lines.append("CLIENT %s => %r" % (" ".join(command), response))
+        if response != b"+OK\r\n":
+            raise AssertionError("write client expected +OK for %s, got %r" % (command, response))
+        expect_propagated_all(replicas, command, command_index)
+
+    response = send_client_command("ECHO", "still-not-a-write")
+    lines.append("CLIENT ECHO => %r" % response)
+    if response != b"$17\r\nstill-not-a-write\r\n":
+        raise AssertionError("ECHO client got unexpected response %r" % response)
+    expect_no_propagation_all(replicas, "ECHO")
+
+    lines.append("MULTI_REPLICA_DONE")
+except Exception as exc:
+    lines.append("ERROR %s" % exc)
+    raise
+finally:
+    for replica in replicas:
+        try:
+            replica.close()
+        except Exception:
+            pass
+
+    with open(output_file, "w", encoding="utf-8") as f:
+        for line in lines:
+            f.write(line + "\n")
+PY
+}
+
 assert_info_replication_master() {
     local port="$1" label_prefix="$2" response
 
@@ -893,6 +1464,132 @@ if start_redis "$rdb_master_port" "$rdb_log" --port "$rdb_master_port"; then
     fi
 
     stop_process "$rdb_master_pid"
+fi
+
+# ---------------------------------------------------------------------------
+# 11. Single-replica propagation
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- Single-replica propagation ---"
+
+prop_master_port=$(get_free_port)
+prop_log="$TMPDIR_LOCAL/prop_master.log"
+prop_client_output="$TMPDIR_LOCAL/prop_client.out"
+
+if start_redis "$prop_master_port" "$prop_log" --port "$prop_master_port"; then
+    prop_master_pid="$LAST_SERVER_PID"
+
+    if run_single_replica_propagation_client "$prop_master_port" "$prop_master_port" "$prop_client_output"; then
+        record_pass "Master propagates write commands to one replica over the handshake connection"
+        check_file_not_contains "Propagation helper saw no errors" "$prop_client_output" "ERROR"
+        check_file_contains_line "PING is not propagated to replica" "$prop_client_output" "NO_PROPAGATION PING"
+        check_file_contains_line "ECHO is not propagated to replica" "$prop_client_output" "NO_PROPAGATION ECHO"
+        check_file_contains_line "GET is not propagated to replica" "$prop_client_output" "NO_PROPAGATION GET"
+        check_file_contains_line "First SET propagated in order" "$prop_client_output" 'PROPAGATED 1 ["SET", "foo", "1"]'
+        check_file_contains_line "Second SET propagated in order" "$prop_client_output" 'PROPAGATED 2 ["SET", "bar", "2"]'
+        check_file_contains_line "Third SET propagated in order" "$prop_client_output" 'PROPAGATED 3 ["SET", "baz", "3"]'
+        check_file_contains_line "SET with spaces in value is propagated" "$prop_client_output" 'PROPAGATED 4 ["SET", "prop:space", "two words"]'
+        check_file_contains_line "SET with empty value is propagated" "$prop_client_output" 'PROPAGATED 5 ["SET", "prop:empty", ""]'
+    else
+        record_fail "Master propagates write commands to one replica over the handshake connection"
+        sed 's/^/    /' "$prop_client_output" 2>/dev/null || true
+    fi
+
+    stop_process "$prop_master_pid"
+fi
+
+# ---------------------------------------------------------------------------
+# 12. Multi-replica propagation
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- Multi-replica propagation ---"
+
+multi_prop_master_port=$(get_free_port)
+multi_prop_log="$TMPDIR_LOCAL/multi_prop_master.log"
+multi_prop_client_output="$TMPDIR_LOCAL/multi_prop_client.out"
+
+if start_redis "$multi_prop_master_port" "$multi_prop_log" --port "$multi_prop_master_port"; then
+    multi_prop_master_pid="$LAST_SERVER_PID"
+
+    if run_multi_replica_propagation_client "$multi_prop_master_port" "$multi_prop_master_port" "$multi_prop_client_output"; then
+        record_pass "Master propagates write commands to all connected replicas"
+        check_file_not_contains "Multi-replica helper saw no errors" "$multi_prop_client_output" "ERROR"
+        check_file_contains_line "Replica 1 completed full sync" "$multi_prop_client_output" "REPLICA 1 READY"
+        check_file_contains_line "Replica 2 completed full sync" "$multi_prop_client_output" "REPLICA 2 READY"
+        check_file_contains_line "Replica 3 completed full sync" "$multi_prop_client_output" "REPLICA 3 READY"
+        check_file_contains_line "PING is not propagated to any replica" "$multi_prop_client_output" "NO_PROPAGATION_ALL PING"
+        check_file_contains_line "ECHO is not propagated to any replica" "$multi_prop_client_output" "NO_PROPAGATION_ALL ECHO"
+        check_file_contains_line "Replica 1 receives SET foo first" "$multi_prop_client_output" 'REPLICA 1 PROPAGATED 1 ["SET", "foo", "1"]'
+        check_file_contains_line "Replica 2 receives SET foo first" "$multi_prop_client_output" 'REPLICA 2 PROPAGATED 1 ["SET", "foo", "1"]'
+        check_file_contains_line "Replica 3 receives SET foo first" "$multi_prop_client_output" 'REPLICA 3 PROPAGATED 1 ["SET", "foo", "1"]'
+        check_file_contains_line "Replica 1 receives SET bar second" "$multi_prop_client_output" 'REPLICA 1 PROPAGATED 2 ["SET", "bar", "2"]'
+        check_file_contains_line "Replica 2 receives SET bar second" "$multi_prop_client_output" 'REPLICA 2 PROPAGATED 2 ["SET", "bar", "2"]'
+        check_file_contains_line "Replica 3 receives SET bar second" "$multi_prop_client_output" 'REPLICA 3 PROPAGATED 2 ["SET", "bar", "2"]'
+        check_file_contains_line "Replica 1 receives SET baz third" "$multi_prop_client_output" 'REPLICA 1 PROPAGATED 3 ["SET", "baz", "3"]'
+        check_file_contains_line "Replica 2 receives SET baz third" "$multi_prop_client_output" 'REPLICA 2 PROPAGATED 3 ["SET", "baz", "3"]'
+        check_file_contains_line "Replica 3 receives SET baz third" "$multi_prop_client_output" 'REPLICA 3 PROPAGATED 3 ["SET", "baz", "3"]'
+        check_file_contains_line "All multi-replica propagation checks completed" "$multi_prop_client_output" "MULTI_REPLICA_DONE"
+    else
+        record_fail "Master propagates write commands to all connected replicas"
+        sed 's/^/    /' "$multi_prop_client_output" 2>/dev/null || true
+    fi
+
+    stop_process "$multi_prop_master_pid"
+fi
+
+# ---------------------------------------------------------------------------
+# 13. Replica processes propagated commands
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- Replica command processing ---"
+
+replica_processing_master_port=$(get_free_port)
+replica_processing_port=$(get_free_port)
+replica_processing_capture="$TMPDIR_LOCAL/replica_processing_master.capture"
+replica_processing_log="$TMPDIR_LOCAL/replica_processing_replica.log"
+
+if start_fake_master_for_replica_processing "$replica_processing_master_port" "$replica_processing_capture"; then
+    if start_redis "$replica_processing_port" "$replica_processing_log" \
+        --port "$replica_processing_port" \
+        --replicaof "127.0.0.1 $replica_processing_master_port"; then
+        replica_processing_pid="$LAST_SERVER_PID"
+
+        if wait_for_file_line "$replica_processing_capture" "PROPAGATION_SENT"; then
+            check_file_contains_line "Replica connected to fake master" "$replica_processing_capture" "CMD 1 PING"
+            check_file_contains_line "Replica requested full sync" "$replica_processing_capture" "CMD 4 PSYNC ? -1"
+            check_file_contains_line "Fake master sent an empty RDB" "$replica_processing_capture" "RDB_SENT 88"
+
+            response=$(send_cmd "$replica_processing_port" GET foo)
+            check_equals "Replica applied propagated SET foo 1" "$response" "$(printf '$1\r\n1\r')"
+
+            response=$(send_cmd "$replica_processing_port" GET bar)
+            check_equals "Replica applied propagated SET bar 2" "$response" "$(printf '$1\r\n2\r')"
+
+            response=$(send_cmd "$replica_processing_port" GET baz)
+            check_equals "Replica applied propagated SET baz 3" "$response" "$(printf '$1\r\n3\r')"
+
+            response=$(send_cmd "$replica_processing_port" GET pipe:one)
+            check_equals "Replica processed first command from pipelined propagation batch" "$response" "$(printf '$5\r\nalpha\r')"
+
+            response=$(send_cmd "$replica_processing_port" GET pipe:two)
+            check_equals "Replica processed second command from pipelined propagation batch" "$response" "$(printf '$4\r\nbeta\r')"
+
+            if wait_for_file_line "$replica_processing_capture" "NO_RESPONSE_AFTER_PROPAGATION" 15; then
+                record_pass "Replica does not reply to propagated commands from master"
+            else
+                record_fail "Replica does not reply to propagated commands from master"
+                sed 's/^/    /' "$replica_processing_capture" 2>/dev/null || true
+            fi
+            check_file_not_contains "Fake master saw no propagated-command replies" "$replica_processing_capture" "REPLICA_RESPONSE_AFTER_PROPAGATION"
+        else
+            record_fail "Fake master sent propagated commands to replica"
+            sed 's/^/    /' "$replica_processing_capture" 2>/dev/null || true
+            fail "  replica log:"
+            sed 's/^/    /' "$replica_processing_log" 2>/dev/null || true
+        fi
+
+        stop_process "$replica_processing_pid"
+    fi
 fi
 
 echo ""

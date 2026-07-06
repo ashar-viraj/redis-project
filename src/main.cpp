@@ -12,11 +12,13 @@
 #include <cerrno>
 #include <csignal>
 
-#include "RESP/resp_parser.h"
-#include "request_handler.h"
-#include "RESP/resp_serializer.h"
 #include "config.h"
 #include "empty_rdb.h"
+#include "network_utils.h"
+#include "replication_manager.h"
+#include "request_handler.h"
+#include "RESP/resp_parser.h"
+#include "RESP/resp_serializer.h"
 
 using namespace std;
 
@@ -36,33 +38,6 @@ string escapeRESP(const string &s) {
     return out;
 }
 
-// Important
-void send_msg(const string &message, int client_fd) {
-  size_t total_sent = 0;
-  while (total_sent < message.size())
-  {
-    ssize_t byte_sent = send(
-        client_fd,
-        message.data() + total_sent,
-        message.size() - total_sent,
-        MSG_NOSIGNAL);
-
-    if (byte_sent == -1)
-    {
-      if (errno == EINTR)
-        continue;
-
-      cout << "Error sending the msg.\n";
-      return;
-    }
-
-    if (byte_sent == 0)
-      return;
-
-    total_sent += static_cast<size_t>(byte_sent);
-  }
-}
-
 string receive_msg(int sock_fd) {
   char buffer[1024] = {0};
 
@@ -74,58 +49,217 @@ string receive_msg(int sock_fd) {
   return string(buffer, len);
 }
 
-void handleClient(int client_fd,
-                 RESPParser &parser,
-                 Store &store,
-                //  RequestHandler &handler,
-                 RESPSerializer &serializer,
-                Config &config) {
-  RequestHandler handler(store, config);
+// Parses and executes as many complete RESP commands as are already sitting
+// in `pending`, WITHOUT touching the socket. Stops as soon as what's left
+// doesn't form a complete command yet (or pending is empty).
+void consumeCommands(int sock_fd,
+                      string &pending,
+                      RESPParser &parser,
+                      RequestHandler &handler,
+                      RESPSerializer &serializer,
+                      Config &config,
+                      bool sendResponse) {
+  while (!pending.empty()) {
+    size_t bytesConsumed = 0;
+    RESPValue req;
 
-  char buffer[MAX_BUFFER_LEN] = {0};
-  while (true)
-  {
-    memset(buffer, 0, sizeof(buffer));
+    try {
+      cout << "===================Request pending===================\n" << escapeRESP(pending) << endl;
+      req = parser.parse(pending, bytesConsumed);
+    } catch (const exception &e) {
+      string msg = e.what();
+      if (msg == "Incomplete RESP message") {
+        // Not enough bytes buffered yet for a full command. Leave `pending`
+        // untouched and wait for the next recv() to bring the rest.
+        break;
+      }
 
-    int msg_len = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
-    if (msg_len <= 0)
+      // A genuinely malformed command (not just incomplete). Report it and
+      // drop the buffer so we don't spin forever trying to reparse garbage.
+      if (sendResponse)
+        send_msg("-" + msg + "\r\n", sock_fd);
+      else
+        cout << "ERR while replicating : " << msg << endl;
+
+      pending.clear();
       break;
-    // cout << "msg len : " << msg_len << (int)buffer[msg_len] << endl;
-    buffer[msg_len] = '\0';
+    }
+
+    // Successfully parsed one full command -- remove exactly the bytes that
+    // belonged to it and keep whatever (possibly partial) data follows.
+    pending.erase(0, bytesConsumed);
 
     string resStr;
     bool sendRdb = false;
-    try{
-      RESPValue req = parser.parse(buffer);
 
-      RESPArray arr = get<RESPArray>(req.value);
-      if(!arr.empty()) {
-        string cmd = get<string>(arr[0].value);
-        toUpper(cmd);
+    try {
+      if (sendResponse) {
+        RESPArray arr = get<RESPArray>(req.value);
+        if (!arr.empty()) {
+          string cmd = get<string>(arr[0].value);
+          toUpper(cmd);
 
-        sendRdb = (!config.isReplica && cmd == "PSYNC");
+          sendRdb = (!config.isReplica && cmd == "PSYNC");
+        }
       }
 
       RESPValue res = handler.handle(req);
-      resStr = serializer.serialize(res);
+
+      if (sendResponse) {
+        resStr = serializer.serialize(res);
+        cout << "=============Recieved=============\n";
+        cout << resStr << endl;
+      }
     } catch (const exception &e) {
       resStr = "-" + string(e.what()) + "\r\n";
-    }catch(...) {
+    } catch (...) {
       resStr = "-ERR unknown error\r\n";
     }
-    send_msg(resStr, client_fd);
 
-    if(sendRdb) {
-      string rdb = getEmptyRdb();
-      send_msg("$" + to_string(rdb.size()) + "\r\n", client_fd);
-      send_msg(rdb, client_fd);
+    if (sendResponse) {
+      send_msg(resStr, sock_fd);
+
+      if (sendRdb) {
+        string rdb = getEmptyRdb();
+        send_msg("$" + to_string(rdb.size()) + "\r\n", sock_fd);
+        send_msg(rdb, sock_fd);
+      }
+    } else if (!resStr.empty()) {
+      cout << "ERR while replicating : " << resStr << endl;
     }
+  }
+}
+
+// Reads whatever is available on sock_fd, appends it to `pending`, and then
+// hands off to consumeCommands() to parse/execute as many complete RESP
+// commands as are now buffered.
+//
+// Returns false when the connection has been closed / recv() failed, so the
+// caller knows to stop looping and clean up.
+bool processIncomingStream(int sock_fd,
+                            string &pending,
+                            RESPParser &parser,
+                            RequestHandler &handler,
+                            RESPSerializer &serializer,
+                            Config &config,
+                            bool sendResponse) {
+  char buffer[MAX_BUFFER_LEN];
+
+  int msg_len = recv(sock_fd, buffer, sizeof(buffer), 0);
+  if (msg_len <= 0)
+    return false;
+
+  pending.append(buffer, msg_len);
+
+  consumeCommands(sock_fd, pending, parser, handler, serializer, config, sendResponse);
+
+  return true;
+}
+
+// Right after PSYNC, the master replies with:
+//   1) "+FULLRESYNC <replid> <offset>\r\n"          (a normal simple string)
+//   2) "$<length>\r\n<raw rdb bytes>"                (NOT a normal bulk
+//      string -- there is no trailing \r\n after the payload)
+//
+// Because (2) isn't valid RESP, it must never be handed to RESPParser::parse.
+// This function strips both pieces directly out of `pending`, pulling more
+// bytes off the socket as needed, and leaves `pending` holding only
+// whatever (if anything) came after the RDB payload -- e.g. the start of
+// the first propagated command.
+bool consumeFullResyncAndRdb(int sock_fd, string &pending) {
+  auto readMore = [&]() -> bool {
+    char buf[MAX_BUFFER_LEN];
+    int len = recv(sock_fd, buf, sizeof(buf), 0);
+    if (len <= 0)
+      return false;
+    pending.append(buf, len);
+    return true;
+  };
+
+  // 1) Consume the "+FULLRESYNC <id> <offset>\r\n" line.
+  size_t lineEnd;
+  while ((lineEnd = pending.find("\r\n")) == string::npos) {
+    if (!readMore())
+      return false;
+  }
+  string fullresyncLine = pending.substr(0, lineEnd);
+  pending.erase(0, lineEnd + 2);
+  cout << "Handshake reply: " << fullresyncLine << endl;
+
+  // 2) Consume the "$<length>\r\n" header describing the RDB payload.
+  size_t hdrEnd;
+  while ((hdrEnd = pending.find("\r\n")) == string::npos) {
+    if (!readMore())
+      return false;
+  }
+  if (pending.empty() || pending[0] != '$')
+    throw runtime_error("Expected RDB bulk header from master");
+
+  int rdbLen = stoi(pending.substr(1, hdrEnd - 1));
+  pending.erase(0, hdrEnd + 2);
+
+  // 3) Consume exactly rdbLen raw bytes. No trailing \r\n to strip here --
+  // that's precisely what made the old code misparse this as a bulk string.
+  while (pending.size() < (size_t)rdbLen) {
+    if (!readMore())
+      return false;
+  }
+  pending.erase(0, rdbLen);
+
+  cout << "Consumed RDB payload (" << rdbLen << " bytes)\n";
+  return true;
+}
+
+
+void handleClient(int client_fd,
+                RESPParser &parser,
+                Store &store,
+                RESPSerializer &serializer,
+                ReplicationManager &replication,
+                Config &config) {
+  RequestHandler handler(store, config, replication, client_fd);
+
+  string pending;
+  while (processIncomingStream(client_fd, pending, parser, handler, serializer, config, /*sendResponse=*/true)) {
+    // keep looping while the connection stays open
   }
 
   close(client_fd);
 }
 
-bool connectToMaster(Config &config, RESPSerializer &serializer) {
+void receiveFromMaster(RESPParser &parser,
+                      Store &store,
+                      RESPSerializer &serializer,
+                      ReplicationManager &replication,
+                      Config &config,
+                      string pending) {
+  RequestHandler handler(store, config, replication, config.masterFd);
+
+  try {
+    if (!consumeFullResyncAndRdb(config.masterFd, pending)) {
+      cout << "Master closed connection while transferring RDB.\n";
+      close(config.masterFd);
+      return;
+    }
+  } catch (const exception &e) {
+    cout << "ERR consuming RDB from master: " << e.what() << endl;
+    close(config.masterFd);
+    return;
+  }
+
+  // Anything that arrived bundled right behind the RDB bytes in the same
+  // recv() (e.g. a propagated SET) is already sitting in `pending` -- handle
+  // it before going back to the socket for more.
+  consumeCommands(config.masterFd, pending, parser, handler, serializer, config, /*sendResponse=*/false);
+
+  while (processIncomingStream(config.masterFd, pending, parser, handler, serializer, config, /*sendResponse=*/false)) {
+    // keep looping while the connection stays open
+  }
+
+  close(config.masterFd);
+}
+
+bool connectToMaster(Config &config, RESPSerializer &serializer, string &pendingAfterHandshake) {
   // IMPORTANT
   addrinfo hints{};
   hints.ai_family = AF_UNSPEC;
@@ -165,6 +299,13 @@ bool connectToMaster(Config &config, RESPSerializer &serializer) {
 
   freeaddrinfo(result);
 
+  // Tracks whatever raw bytes came back from the most recent handshake
+  // step. After the PSYNC step this will hold the "+FULLRESYNC ...\r\n"
+  // line and possibly the start of the RDB bytes too (since they can
+  // arrive in the same recv()) -- we hand all of it off to
+  // receiveFromMaster() so nothing gets silently dropped.
+  string lastReceived;
+
   auto sendAndReceive = [&](const RESPArray &cmd) {
     // cout << "===========Sending==========="<< endl;
     // cout << escapeRESP(serializer.serialize({cmd, '*'})) << endl;
@@ -179,6 +320,7 @@ bool connectToMaster(Config &config, RESPSerializer &serializer) {
       config.masterFd = -1;
       return false;
     }
+    lastReceived = recieved;
     return true;
   };
 
@@ -204,6 +346,10 @@ bool connectToMaster(Config &config, RESPSerializer &serializer) {
                        RESPValue("-1", '$')}))
     return false;
   // Continue with serializer / handshake...
+
+  // Hand off whatever came back with the PSYNC reply so receiveFromMaster
+  // can strip the FULLRESYNC line + RDB payload from it correctly.
+  pendingAfterHandshake = lastReceived;
 
   return true;
 }
@@ -243,12 +389,17 @@ int main(int argc, char **argv)
   }
 
   RESPSerializer serializer;
+  RESPParser parser;
+  Store store;
+  ReplicationManager replication(serializer);
 
   if(config.isReplica) {
-    if(!connectToMaster(config, serializer)) {
+    string masterPending;
+    if(!connectToMaster(config, serializer, masterPending)) {
       cerr << "Failed to connect to master\n";
       return 1;
     }
+    thread(receiveFromMaster, ref(parser), ref(store), ref(serializer), ref(replication), ref(config), masterPending).detach();
   }
 
 
@@ -295,10 +446,6 @@ int main(int argc, char **argv)
 
   // Uncomment the code below to pass the first stage
 
-  Store store;
-
-  RESPParser parser;
-
   while (true)
   {
     int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, (socklen_t *)&client_addr_len);
@@ -308,7 +455,7 @@ int main(int argc, char **argv)
       continue;
     }
     // std::cout << "Client connected\n";
-    thread(handleClient, client_fd, ref(parser), ref(store), ref(serializer), ref(config)).detach();
+    thread(handleClient, client_fd, ref(parser), ref(store), ref(serializer), ref(replication), ref(config)).detach();
 
     // handleClient(client_fd);
   }

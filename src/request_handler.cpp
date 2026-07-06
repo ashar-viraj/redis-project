@@ -1,5 +1,6 @@
 #include "request_handler.h"
 #include "store.h"
+#include "network_utils.h"
 #include <stdexcept>
 #include <iostream>
 
@@ -10,70 +11,84 @@ void toUpper(string &s) {
         e = toupper(e);
 }
 
-RequestHandler::RequestHandler(Store &s, Config &config) : store(s), config(config){}
+RequestHandler::RequestHandler(Store &s,
+        Config &config,
+        ReplicationManager &replication,
+        int fd)
+        : store(s), config(config), replication(replication), clientFd(fd) { }
 
 RESPValue RequestHandler::executeCommand(const string &cmd, const RESPArray &arr) {
+    RESPValue res;
+
     if(cmd == "PING")
-        return handlePing();
+        res = handlePing();
 
-    if(cmd == "ECHO")
-        return handleEcho(arr);
+    else if(cmd == "ECHO")
+        res = handleEcho(arr);
 
-    if(cmd == "SET")
-        return handleSet(arr);
+    else if(cmd == "SET")
+        res = handleSet(arr);
 
-    if(cmd == "GET")
-        return handleGet(arr);
+    else if(cmd == "GET")
+        res = handleGet(arr);
 
-    if(cmd == "RPUSH")
-        return handleRpush(arr);
+    else if(cmd == "RPUSH")
+        res = handleRpush(arr);
 
-    if(cmd == "LPUSH")
-        return handleLpush(arr);
+    else if(cmd == "LPUSH")
+        res = handleLpush(arr);
 
-    if(cmd == "LRANGE")
-        return handleLrange(arr);
+    else if(cmd == "LRANGE")
+        res = handleLrange(arr);
 
-    if(cmd == "LLEN")
-        return handleLlen(arr);
+    else if(cmd == "LLEN")
+        res = handleLlen(arr);
 
-    if(cmd == "LPOP")
-        return handleLpop(arr);
+    else if(cmd == "LPOP")
+        res = handleLpop(arr);
 
-    if(cmd == "BLPOP")
-        return handleBlpop(arr);
+    else if(cmd == "BLPOP")
+        res = handleBlpop(arr);
 
-    if(cmd == "TYPE")
-        return handleType(arr);
+    else if(cmd == "TYPE")
+        res = handleType(arr);
 
-    if(cmd == "XADD")
-        return handleXadd(arr);
+    else if(cmd == "XADD")
+        res = handleXadd(arr);
 
-    if(cmd == "XRANGE")
-        return handleXrange(arr);
+    else if(cmd == "XRANGE")
+        res = handleXrange(arr);
 
-    if(cmd == "XREAD")
-        return handleXread(arr);
+    else if(cmd == "XREAD")
+        res = handleXread(arr);
 
-    if(cmd == "INCR")
-        return handleIncr(arr);
+    else if(cmd == "INCR")
+        res = handleIncr(arr);
 
-    if(cmd == "WATCH")
-        return handleWatch(arr);
+    else if(cmd == "WATCH")
+        res = handleWatch(arr);
 
-    if(cmd == "UNWATCH")
-        return handleUnwatch(arr);
+    else if(cmd == "UNWATCH")
+        res = handleUnwatch(arr);
 
-    if(cmd == "INFO")
-        return handleInfo(arr);
+    else if(cmd == "INFO")
+        res = handleInfo(arr);
 
-    if(cmd == "REPLCONF")
-        return handleReplConf(arr);
+    else if(cmd == "REPLCONF")
+        res = handleReplConf(arr);
 
-    if(cmd == "PSYNC")
-        return handlePsync(arr);
+    else if(cmd == "PSYNC")
+        res = handlePsync(arr);
 
-    return {"ERR unkown command", '-'};
+    else
+        res = {"ERR unkown command", '-'};
+
+    if(cmd == "SET") {
+        cout << "Sending for propagate.\n";
+        replication.propagate(arr);
+    }
+
+    return res;
 }
 
 RESPValue RequestHandler::handle(const RESPValue &req) {
@@ -592,6 +607,8 @@ RESPValue RequestHandler::handleReplConf(const RESPArray &arr) {
 
 RESPValue RequestHandler::handlePsync(const RESPArray &arr) {
     string reply = "FULLRESYNC " + config.masterReplId + " " + to_string(config.masterReplOffset);
+    cout << "clientFd : " << clientFd << endl;
+    replication.addReplica(clientFd);
 
     return {reply, '+'};
 }

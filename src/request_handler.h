@@ -1,5 +1,7 @@
 #pragma once
 #include "RESP/resp_parser.h"
+#include "RESP/resp_serializer.h"
+#include "replication_manager.h"
 #include "store.h"
 #include "config.h"
 #include <unordered_map>
@@ -16,9 +18,11 @@ class RequestHandler{
 private:
     Store &store;
     Config &config;
+    int clientFd;
+    ReplicationManager &replication;
 
 public:
-    RequestHandler(Store &store, Config &config);
+    RequestHandler(Store &store, Config &config, ReplicationManager &replication, int fd);
     RESPValue handle(const RESPValue &req);
     ClientState state;
 
