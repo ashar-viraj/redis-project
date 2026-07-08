@@ -83,7 +83,7 @@ RESPValue RequestHandler::executeCommand(const string &cmd, const RESPArray &arr
     else
         res = {"ERR unkown command", '-'};
 
-    if(cmd == "SET") {
+    if(cmd == "SET" || cmd == "" || cmd == "UNWATCH" || cmd == "WATCH" || cmd == "INCR" || cmd == "XADD" || cmd == "BLPOP" || cmd == "LPOP" || cmd == "RPUSH" || cmd == "LPUSH") {
         cout << "Sending for propagate.\n";
         replication.propagate(arr);
     }
@@ -602,6 +602,23 @@ RESPValue RequestHandler::handleInfo(const RESPArray &arr)
 }
 
 RESPValue RequestHandler::handleReplConf(const RESPArray &arr) {
+    if(config.isReplica) {
+        if(arr.size() >= 3) {
+            string sub = get<string>(arr[1].value);
+            toUpper(sub);
+
+            if(sub == "GETACK") {
+                RESPArray ack = {
+                    {"REPLCONF", '$'},
+                    {"ACK", '$'},
+                    {to_string(replication.getProcessedOffset()), '$'}
+                };
+
+                return {ack, '*'};
+            }
+        }
+    }
+
     return {"OK", '+'};
 }
 

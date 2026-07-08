@@ -20,9 +20,17 @@ void ReplicationManager::propagate(const RESPArray &arr) {
     cout << "Propagating to " << replicaSockets.size() << " clients\n";
     const string bytes = serializer.serialize({arr, '*'});
 
-    for(auto replica : replicaSockets) {
+    for(auto &replica : replicaSockets) {
         cout << "Sending to " << replica.clientFd << endl;
         cout << bytes << endl;
         send_msg(bytes, replica.clientFd);
     }
+}
+
+long long ReplicationManager::getProcessedOffset() const {
+    return processedOffset;
+}
+
+void ReplicationManager::addProcessedOffset(long long bytes) {
+    processedOffset += bytes;
 }

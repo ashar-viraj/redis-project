@@ -536,6 +536,189 @@ PY
     return 1
 }
 
+start_fake_master_for_ack_tests() {
+    local port="$1" capture_file="$2" mode="$3"
+
+    python3 - "$port" "$capture_file" "$mode" <<'PY' &
+import json
+import select
+import socket
+import sys
+import time
+
+port = int(sys.argv[1])
+capture_file = sys.argv[2]
+mode = sys.argv[3]
+repl_id = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb"
+empty_rdb = bytes.fromhex(
+    "524544495330303131"
+    "fa0972656469732d766572"
+    "05372e322e30"
+    "fa0a72656469732d62697473"
+    "c040"
+    "fa056374696d65"
+    "c26d08bc65"
+    "fa08757365642d6d656d"
+    "c2b0c41000"
+    "fa08616f662d62617365"
+    "c000"
+    "fff06e3bfec0ff5aa2"
+)
+
+def emit(line):
+    with open(capture_file, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+        f.flush()
+
+def resp_array(*args):
+    out = bytearray()
+    out.extend(("*%d\r\n" % len(args)).encode("ascii"))
+    for arg in args:
+        data = str(arg).encode("utf-8")
+        out.extend(("$%d\r\n" % len(data)).encode("ascii"))
+        out.extend(data + b"\r\n")
+    return bytes(out)
+
+def read_line(conn):
+    data = bytearray()
+    while not data.endswith(b"\r\n"):
+        chunk = conn.recv(1)
+        if not chunk:
+            raise EOFError("connection closed while reading line")
+        data.extend(chunk)
+    return bytes(data)
+
+def read_resp_array(conn):
+    first = read_line(conn)
+    if not first.startswith(b"*"):
+        raise ValueError("expected RESP array, got %r" % first)
+
+    count = int(first[1:-2])
+    values = []
+    for _ in range(count):
+        header = read_line(conn)
+        if not header.startswith(b"$"):
+            raise ValueError("expected bulk string, got %r" % header)
+
+        size = int(header[1:-2])
+        payload = bytearray()
+        while len(payload) < size + 2:
+            chunk = conn.recv(size + 2 - len(payload))
+            if not chunk:
+                raise EOFError("connection closed while reading bulk string")
+            payload.extend(chunk)
+
+        if not payload.endswith(b"\r\n"):
+            raise ValueError("bulk string missing CRLF")
+        values.append(bytes(payload[:-2]).decode("utf-8", "replace"))
+
+    return values
+
+def expect_ack(conn, expected_offset, label):
+    values = read_resp_array(conn)
+    emit("%s %s" % (label, json.dumps(values)))
+    expected = ["REPLCONF", "ACK", str(expected_offset)]
+    if values != expected:
+        raise AssertionError("%s expected %s, got %s" % (label, expected, values))
+
+def expect_no_response(conn, label):
+    readable, _, _ = select.select([conn], [], [], 0.35)
+    if readable:
+        data = conn.recv(1024)
+        emit("%s_UNEXPECTED_RESPONSE %r" % (label, data))
+        raise AssertionError("%s unexpectedly received response %r" % (label, data))
+    emit("%s_NO_RESPONSE" % label)
+
+def complete_handshake(conn):
+    handshake_responses = [
+        b"+PONG\r\n",
+        b"+OK\r\n",
+        b"+OK\r\n",
+    ]
+
+    for index, response in enumerate(handshake_responses, start=1):
+        values = read_resp_array(conn)
+        emit("CMD %d %s" % (index, " ".join(values)))
+        conn.sendall(response)
+
+    values = read_resp_array(conn)
+    emit("CMD 4 %s" % " ".join(values))
+    conn.sendall(("+FULLRESYNC %s 0\r\n" % repl_id).encode("ascii"))
+    conn.sendall(("$%d\r\n" % len(empty_rdb)).encode("ascii"))
+    conn.sendall(empty_rdb)
+    emit("RDB_SENT %d" % len(empty_rdb))
+
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", port))
+    server.listen(1)
+    server.settimeout(8)
+    emit("LISTENING %d" % port)
+
+    try:
+        conn, addr = server.accept()
+    except socket.timeout:
+        emit("ERROR accept timeout")
+        sys.exit(2)
+
+    try:
+        with conn:
+            emit("CONNECTED %s:%d" % addr)
+            conn.settimeout(8)
+            complete_handshake(conn)
+            time.sleep(0.2)
+
+            if mode == "basic":
+                conn.sendall(resp_array("REPLCONF", "GETACK", "*"))
+                expect_ack(conn, 0, "ACK_NO_COMMANDS")
+                emit("ACK_TEST_DONE basic")
+            elif mode == "offsets":
+                conn.sendall(resp_array("REPLCONF", "GETACK", "*"))
+                expect_ack(conn, 0, "ACK_OFFSET_0")
+
+                conn.sendall(resp_array("PING"))
+                expect_no_response(conn, "PING")
+
+                conn.sendall(resp_array("REPLCONF", "GETACK", "*"))
+                expect_ack(conn, 51, "ACK_OFFSET_51")
+
+                conn.sendall(
+                    resp_array("SET", "foo", "1") +
+                    resp_array("SET", "bar", "2")
+                )
+                expect_no_response(conn, "SETS")
+
+                conn.sendall(resp_array("REPLCONF", "GETACK", "*"))
+                expect_ack(conn, 146, "ACK_OFFSET_146")
+                emit("ACK_TEST_DONE offsets")
+            else:
+                raise ValueError("unknown ACK test mode %r" % mode)
+
+            time.sleep(1)
+    except Exception as exc:
+        emit("ERROR %s" % exc)
+        raise
+PY
+    LAST_FAKE_MASTER_PID=$!
+    FAKE_MASTER_PIDS+=("$LAST_FAKE_MASTER_PID")
+
+    for _ in $(seq 1 60); do
+        if grep -Fxq "LISTENING $port" "$capture_file" 2>/dev/null; then
+            return 0
+        fi
+        if ! kill -0 "$LAST_FAKE_MASTER_PID" 2>/dev/null; then
+            record_fail "ACK fake master started on port $port"
+            sed 's/^/    /' "$capture_file" 2>/dev/null || true
+            return 1
+        fi
+        sleep 0.1
+    done
+
+    record_fail "ACK fake master started on port $port"
+    fail "  timed out waiting for fake master to listen"
+    return 1
+}
+
 run_master_handshake_client() {
     local port="$1" replica_port="$2" output_file="$3"
 
@@ -1589,6 +1772,73 @@ if start_fake_master_for_replica_processing "$replica_processing_master_port" "$
         fi
 
         stop_process "$replica_processing_pid"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# 14. ACKs with no commands
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- ACKs with no commands ---"
+
+ack_basic_master_port=$(get_free_port)
+ack_basic_replica_port=$(get_free_port)
+ack_basic_capture="$TMPDIR_LOCAL/ack_basic_master.capture"
+ack_basic_log="$TMPDIR_LOCAL/ack_basic_replica.log"
+
+if start_fake_master_for_ack_tests "$ack_basic_master_port" "$ack_basic_capture" basic; then
+    if start_redis "$ack_basic_replica_port" "$ack_basic_log" \
+        --port "$ack_basic_replica_port" \
+        --replicaof "127.0.0.1 $ack_basic_master_port"; then
+        ack_basic_pid="$LAST_SERVER_PID"
+
+        if wait_for_file_line "$ack_basic_capture" "ACK_TEST_DONE basic"; then
+            check_file_not_contains "ACK/no-command fake master saw no errors" "$ack_basic_capture" "ERROR"
+            check_file_contains_line "Replica completed handshake before ACK request" "$ack_basic_capture" "CMD 4 PSYNC ? -1"
+            check_file_contains_line "Replica ACKs zero when no propagated commands were processed" "$ack_basic_capture" 'ACK_NO_COMMANDS ["REPLCONF", "ACK", "0"]'
+        else
+            record_fail "Replica responds to REPLCONF GETACK * with ACK 0"
+            sed 's/^/    /' "$ack_basic_capture" 2>/dev/null || true
+            fail "  replica log:"
+            sed 's/^/    /' "$ack_basic_log" 2>/dev/null || true
+        fi
+
+        stop_process "$ack_basic_pid"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# 15. ACKs with commands
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- ACKs with commands ---"
+
+ack_offsets_master_port=$(get_free_port)
+ack_offsets_replica_port=$(get_free_port)
+ack_offsets_capture="$TMPDIR_LOCAL/ack_offsets_master.capture"
+ack_offsets_log="$TMPDIR_LOCAL/ack_offsets_replica.log"
+
+if start_fake_master_for_ack_tests "$ack_offsets_master_port" "$ack_offsets_capture" offsets; then
+    if start_redis "$ack_offsets_replica_port" "$ack_offsets_log" \
+        --port "$ack_offsets_replica_port" \
+        --replicaof "127.0.0.1 $ack_offsets_master_port"; then
+        ack_offsets_pid="$LAST_SERVER_PID"
+
+        if wait_for_file_line "$ack_offsets_capture" "ACK_TEST_DONE offsets"; then
+            check_file_not_contains "ACK/offset fake master saw no errors" "$ack_offsets_capture" "ERROR"
+            check_file_contains_line "Initial GETACK returns ACK 0" "$ack_offsets_capture" 'ACK_OFFSET_0 ["REPLCONF", "ACK", "0"]'
+            check_file_contains_line "Replica does not respond to propagated PING" "$ack_offsets_capture" "PING_NO_RESPONSE"
+            check_file_contains_line "GETACK after PING returns ACK 51" "$ack_offsets_capture" 'ACK_OFFSET_51 ["REPLCONF", "ACK", "51"]'
+            check_file_contains_line "Replica does not respond to propagated SET commands" "$ack_offsets_capture" "SETS_NO_RESPONSE"
+            check_file_contains_line "GETACK after two SETs returns ACK 146" "$ack_offsets_capture" 'ACK_OFFSET_146 ["REPLCONF", "ACK", "146"]'
+        else
+            record_fail "Replica tracks processed-byte offsets for REPLCONF ACK"
+            sed 's/^/    /' "$ack_offsets_capture" 2>/dev/null || true
+            fail "  replica log:"
+            sed 's/^/    /' "$ack_offsets_log" 2>/dev/null || true
+        fi
+
+        stop_process "$ack_offsets_pid"
     fi
 fi
 

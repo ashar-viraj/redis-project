@@ -58,6 +58,7 @@ void consumeCommands(int sock_fd,
                       RequestHandler &handler,
                       RESPSerializer &serializer,
                       Config &config,
+                      ReplicationManager &replication,
                       bool sendResponse) {
   while (!pending.empty()) {
     size_t bytesConsumed = 0;
@@ -105,18 +106,33 @@ void consumeCommands(int sock_fd,
 
       RESPValue res = handler.handle(req);
 
-      if (sendResponse) {
-        resStr = serializer.serialize(res);
-        cout << "=============Recieved=============\n";
-        cout << resStr << endl;
-      }
+      resStr = serializer.serialize(res);
+      cout << "=============Recieved=============\n";
+      cout << resStr << endl;
     } catch (const exception &e) {
       resStr = "-" + string(e.what()) + "\r\n";
     } catch (...) {
       resStr = "-ERR unknown error\r\n";
     }
 
-    if (sendResponse) {
+    bool shouldReply = sendResponse;
+
+    if(!sendResponse) {
+      RESPArray arr = get<RESPArray>(req.value);
+
+      string cmd = get<string>(arr[0].value);
+      toUpper(cmd);
+
+      if(cmd == "REPLCONF" && arr.size() >= 2) {
+        string sub = get<string>(arr[1].value);
+        toUpper(sub);
+
+        if(sub == "GETACK")
+          shouldReply = true;
+      }
+    }
+
+    if(shouldReply) {
       send_msg(resStr, sock_fd);
 
       if (sendRdb) {
@@ -127,6 +143,9 @@ void consumeCommands(int sock_fd,
     } else if (!resStr.empty()) {
       cout << "ERR while replicating : " << resStr << endl;
     }
+
+    if(!sendResponse)
+      replication.addProcessedOffset(bytesConsumed);
   }
 }
 
@@ -142,6 +161,7 @@ bool processIncomingStream(int sock_fd,
                             RequestHandler &handler,
                             RESPSerializer &serializer,
                             Config &config,
+                            ReplicationManager &replication,
                             bool sendResponse) {
   char buffer[MAX_BUFFER_LEN];
 
@@ -151,7 +171,7 @@ bool processIncomingStream(int sock_fd,
 
   pending.append(buffer, msg_len);
 
-  consumeCommands(sock_fd, pending, parser, handler, serializer, config, sendResponse);
+  consumeCommands(sock_fd, pending, parser, handler, serializer, config, replication, sendResponse);
 
   return true;
 }
@@ -220,7 +240,7 @@ void handleClient(int client_fd,
   RequestHandler handler(store, config, replication, client_fd);
 
   string pending;
-  while (processIncomingStream(client_fd, pending, parser, handler, serializer, config, /*sendResponse=*/true)) {
+  while (processIncomingStream(client_fd, pending, parser, handler, serializer, config, replication, /*sendResponse=*/true)) {
     // keep looping while the connection stays open
   }
 
@@ -250,9 +270,9 @@ void receiveFromMaster(RESPParser &parser,
   // Anything that arrived bundled right behind the RDB bytes in the same
   // recv() (e.g. a propagated SET) is already sitting in `pending` -- handle
   // it before going back to the socket for more.
-  consumeCommands(config.masterFd, pending, parser, handler, serializer, config, /*sendResponse=*/false);
+  consumeCommands(config.masterFd, pending, parser, handler, serializer, config, replication, /*sendResponse=*/false);
 
-  while (processIncomingStream(config.masterFd, pending, parser, handler, serializer, config, /*sendResponse=*/false)) {
+  while (processIncomingStream(config.masterFd, pending, parser, handler, serializer, config, replication, /*sendResponse=*/false)) {
     // keep looping while the connection stays open
   }
 

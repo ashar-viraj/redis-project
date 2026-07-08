@@ -44,6 +44,9 @@ run_stage "$TESTS_DIR/test_xrange_end_plus.sh"    "Stage 21: XRANGE with '+' end
 run_stage "$TESTS_DIR/test_xread.sh"              "Stage 22: XREAD single stream queries"
 run_stage "$TESTS_DIR/test_xread_multiple_streams.sh" "Stage 23: XREAD multiple stream queries"
 run_stage "$TESTS_DIR/test_xread_blocking.sh"     "Stage 24/25/26: XREAD blocking queries"
+run_stage "$TESTS_DIR/test_watch.sh"              "Stage 27: WATCH/UNWATCH"
+run_stage "$TESTS_DIR/test_transactions.sh"       "Stage 28: Transactions (MULTI/EXEC)"
+run_stage "$TESTS_DIR/test_replication.sh"        "Stage 29: Replication"
 
 echo "=============================="
 echo "Results: $PASS passed, $FAIL failed"

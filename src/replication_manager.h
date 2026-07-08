@@ -11,10 +11,13 @@ struct Replica {
 class ReplicationManager {
     vector<Replica> replicaSockets;
     RESPSerializer serializer;
+    long long processedOffset = 0;
 
 public:
     ReplicationManager(RESPSerializer &serializer);
 
     void addReplica(int fd);
     void propagate(const RESPArray &arr);
+    long long getProcessedOffset() const;
+    void addProcessedOffset(long long bytes);
 };
