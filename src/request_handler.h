@@ -53,4 +53,5 @@ private:
     RESPValue handleInfo(const RESPArray &arr);
     RESPValue handleReplConf(const RESPArray &arr);
     RESPValue handlePsync(const RESPArray &arr);
+    RESPValue handleWait(const RESPArray &arr);
 };

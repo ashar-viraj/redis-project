@@ -92,16 +92,21 @@ void consumeCommands(int sock_fd,
 
     string resStr;
     bool sendRdb = false;
+    string cmd, sub;
 
     try {
-      if (sendResponse) {
-        RESPArray arr = get<RESPArray>(req.value);
-        if (!arr.empty()) {
-          string cmd = get<string>(arr[0].value);
-          toUpper(cmd);
+      RESPArray arr = get<RESPArray>(req.value);
+      if (!arr.empty()) {
+        cmd = get<string>(arr[0].value);
+        toUpper(cmd);
 
-          sendRdb = (!config.isReplica && cmd == "PSYNC");
+        if(cmd == "REPLCONF" && arr.size() >= 2) {
+          sub = get<string>(arr[1].value);
+          toUpper(sub);
         }
+
+        if (sendResponse)
+          sendRdb = (!config.isReplica && cmd == "PSYNC");
       }
 
       RESPValue res = handler.handle(req);
@@ -117,20 +122,11 @@ void consumeCommands(int sock_fd,
 
     bool shouldReply = sendResponse;
 
-    if(!sendResponse) {
-      RESPArray arr = get<RESPArray>(req.value);
+    if(!sendResponse && cmd == "REPLCONF" && sub == "GETACK")
+      shouldReply = true;
 
-      string cmd = get<string>(arr[0].value);
-      toUpper(cmd);
-
-      if(cmd == "REPLCONF" && arr.size() >= 2) {
-        string sub = get<string>(arr[1].value);
-        toUpper(sub);
-
-        if(sub == "GETACK")
-          shouldReply = true;
-      }
-    }
+    if (sendResponse && cmd != "PSYNC" && replication.isReplicaConnection(sock_fd))
+      shouldReply = false;
 
     if(shouldReply) {
       send_msg(resStr, sock_fd);
@@ -243,6 +239,8 @@ void handleClient(int client_fd,
   while (processIncomingStream(client_fd, pending, parser, handler, serializer, config, replication, /*sendResponse=*/true)) {
     // keep looping while the connection stays open
   }
+
+  replication.removeReplica(client_fd);
 
   close(client_fd);
 }

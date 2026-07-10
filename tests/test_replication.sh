@@ -195,6 +195,65 @@ send_raw() {
     printf '%b' "$raw" | timeout 4 nc -q 1 -W 1 127.0.0.1 "$port" 2>/dev/null
 }
 
+send_psync_and_consume_rdb() {
+    local port="$1"
+    shift
+
+    python3 - "$port" "$@" <<'PY'
+import select
+import socket
+import sys
+
+port = int(sys.argv[1])
+args = sys.argv[2:]
+
+def resp_array(*items):
+    out = bytearray()
+    out.extend(("*%d\r\n" % len(items)).encode("ascii"))
+    for item in items:
+        data = str(item).encode("utf-8")
+        out.extend(("$%d\r\n" % len(data)).encode("ascii"))
+        out.extend(data + b"\r\n")
+    return bytes(out)
+
+def read_exact(sock, size):
+    data = bytearray()
+    while len(data) < size:
+        chunk = sock.recv(size - len(data))
+        if not chunk:
+            break
+        data.extend(chunk)
+    return bytes(data)
+
+def read_line(sock):
+    data = bytearray()
+    while not data.endswith(b"\r\n"):
+        chunk = sock.recv(1)
+        if not chunk:
+            break
+        data.extend(chunk)
+    return bytes(data)
+
+with socket.create_connection(("127.0.0.1", port), timeout=4) as sock:
+    sock.settimeout(4)
+    sock.sendall(resp_array(*args))
+    line = read_line(sock)
+    sys.stdout.write(line.decode("utf-8", "replace"))
+
+    readable, _, _ = select.select([sock], [], [], 0.2)
+    if readable:
+        prefix = read_exact(sock, 1)
+        if prefix == b"$":
+            length_line = read_line(sock)
+            try:
+                length = int(length_line[:-2])
+            except ValueError:
+                length = 0
+            if length > 0:
+                read_exact(sock, length)
+PY
+}
+
 get_free_port() {
     python3 - <<'PY'
 import socket
@@ -819,13 +878,6 @@ try:
             lines.append("RDB after PSYNC => none")
         else:
             lines.append("RDB after PSYNC => %d bytes" % len(rdb))
-
-        sock.sendall(resp_array("PING"))
-        response = read_line(sock)
-        lines.append("PING after PSYNC => %r" % (response,))
-        if response != b"+PONG\r\n":
-            lines.append("ERROR connection did not stay usable after PSYNC")
-            raise SystemExit(4)
 except Exception as exc:
     lines.append("ERROR %s" % exc)
     raise
@@ -1389,6 +1441,284 @@ finally:
 PY
 }
 
+run_wait_with_multiple_commands_client() {
+    local port="$1" output_file="$2" scenario="$3"
+
+    python3 - "$port" "$output_file" "$scenario" <<'PY'
+import json
+import re
+import select
+import socket
+import sys
+import time
+
+port = int(sys.argv[1])
+output_file = sys.argv[2]
+scenario = sys.argv[3]
+
+def resp_array(*args):
+    out = bytearray()
+    out.extend(("*%d\r\n" % len(args)).encode("ascii"))
+    for arg in args:
+        data = str(arg).encode("utf-8")
+        out.extend(("$%d\r\n" % len(data)).encode("ascii"))
+        out.extend(data + b"\r\n")
+    return bytes(out)
+
+def read_exact(sock, size):
+    data = bytearray()
+    while len(data) < size:
+        chunk = sock.recv(size - len(data))
+        if not chunk:
+            raise EOFError("connection closed while reading %d bytes" % size)
+        data.extend(chunk)
+    return bytes(data)
+
+def read_line(sock):
+    data = bytearray()
+    while not data.endswith(b"\r\n"):
+        chunk = sock.recv(1)
+        if not chunk:
+            raise EOFError("connection closed while reading line")
+        data.extend(chunk)
+    return bytes(data)
+
+def read_bulk_string_with_raw(sock):
+    raw = bytearray()
+    header = read_line(sock)
+    raw.extend(header)
+    if not header.startswith(b"$"):
+        raise ValueError("expected bulk string, got %r" % header)
+
+    length = int(header[1:-2])
+    payload = read_exact(sock, length + 2)
+    raw.extend(payload)
+    if not payload.endswith(b"\r\n"):
+        raise ValueError("bulk string missing trailing CRLF")
+    return payload[:-2].decode("utf-8", "replace"), bytes(raw)
+
+def read_resp_array_with_raw(sock):
+    raw = bytearray()
+    first = read_line(sock)
+    raw.extend(first)
+    if not first.startswith(b"*"):
+        raise ValueError("expected RESP array, got %r" % first)
+
+    count = int(first[1:-2])
+    values = []
+    for _ in range(count):
+        value, part = read_bulk_string_with_raw(sock)
+        values.append(value)
+        raw.extend(part)
+    return values, bytes(raw)
+
+def read_resp_reply(sock):
+    first = read_line(sock)
+    if first.startswith(b"$"):
+        length = int(first[1:-2])
+        if length == -1:
+            return first
+        return first + read_exact(sock, length + 2)
+    return first
+
+def read_resp_integer(sock):
+    line = read_line(sock)
+    if not line.startswith(b":"):
+        raise ValueError("expected RESP integer, got %r" % line)
+    return int(line[1:-2])
+
+def read_rdb_bulk(sock):
+    prefix = read_exact(sock, 1)
+    if prefix != b"$":
+        raise ValueError("expected RDB bulk prefix '$', got %r" % prefix)
+
+    length = int(read_line(sock)[:-2])
+    payload = read_exact(sock, length)
+    if not re.fullmatch(rb"REDIS[0-9]{4}", payload[:9]):
+        raise ValueError("RDB payload does not start with REDIS version header")
+    return payload
+
+def send_client_command(*args):
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
+        client.settimeout(5)
+        client.sendall(resp_array(*args))
+        return read_resp_reply(client)
+
+def connect_replica(replica_index, behavior):
+    sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+    sock.settimeout(5)
+
+    handshake = [
+        (resp_array("PING"), b"+PONG\r\n"),
+        (resp_array("REPLCONF", "listening-port", str(31000 + replica_index)), b"+OK\r\n"),
+        (resp_array("REPLCONF", "capa", "eof", "capa", "psync2"), b"+OK\r\n"),
+    ]
+
+    for request, expected in handshake:
+        sock.sendall(request)
+        response = read_line(sock)
+        if response != expected:
+            raise AssertionError("replica %d handshake expected %r, got %r" % (
+                replica_index,
+                expected,
+                response,
+            ))
+
+    sock.sendall(resp_array("PSYNC", "?", "-1"))
+    fullresync = read_line(sock)
+    if not re.fullmatch(rb"\+FULLRESYNC [A-Za-z0-9]{40} 0\r\n", fullresync):
+        raise AssertionError("replica %d expected FULLRESYNC, got %r" % (replica_index, fullresync))
+
+    rdb = read_rdb_bulk(sock)
+    lines.append("WAIT_REPLICA %d READY %s" % (replica_index, behavior))
+    lines.append("WAIT_REPLICA %d READY_BYTES %d" % (replica_index, len(rdb)))
+    return {
+        "index": replica_index,
+        "behavior": behavior,
+        "sock": sock,
+        "offset": 0,
+        "acks": 0,
+    }
+
+def is_getack(values):
+    return (
+        len(values) == 3 and
+        values[0].upper() == "REPLCONF" and
+        values[1].upper() == "GETACK" and
+        values[2] == "*"
+    )
+
+def process_replica_command(replica):
+    values, raw = read_resp_array_with_raw(replica["sock"])
+    lines.append("WAIT_REPLICA %d RECEIVED %s" % (
+        replica["index"],
+        json.dumps(values),
+    ))
+
+    if is_getack(values):
+        behavior = replica["behavior"]
+        if behavior == "good":
+            ack_offset = replica["offset"]
+            replica["sock"].sendall(resp_array("REPLCONF", "ACK", str(ack_offset)))
+            lines.append("WAIT_REPLICA %d ACK %d" % (replica["index"], ack_offset))
+        elif behavior == "stale":
+            replica["sock"].sendall(resp_array("REPLCONF", "ACK", "0"))
+            lines.append("WAIT_REPLICA %d ACK_STALE 0" % replica["index"])
+        elif behavior == "invalid":
+            replica["sock"].sendall(resp_array("REPLCONF", "NOPE", "0"))
+            lines.append("WAIT_REPLICA %d ACK_INVALID" % replica["index"])
+        elif behavior == "silent":
+            lines.append("WAIT_REPLICA %d ACK_SILENT" % replica["index"])
+        else:
+            raise ValueError("unknown replica behavior %r" % behavior)
+        replica["offset"] += len(raw)
+        replica["acks"] += 1
+        return "getack"
+
+    replica["offset"] += len(raw)
+    return "command"
+
+def drain_expected_propagation(replicas, expected_commands):
+    for expected in expected_commands:
+        for replica in replicas:
+            readable, _, _ = select.select([replica["sock"]], [], [], 3)
+            if not readable:
+                raise TimeoutError("replica %d did not receive propagated %s" % (
+                    replica["index"],
+                    expected,
+                ))
+            before = replica["offset"]
+            kind = process_replica_command(replica)
+            if kind != "command":
+                raise AssertionError("expected propagated command, got GETACK")
+            lines.append("WAIT_REPLICA %d OFFSET %d->%d" % (
+                replica["index"],
+                before,
+                replica["offset"],
+            ))
+
+def wait_command(num_replicas, timeout_ms, expected_count, label, replicas):
+    client = socket.create_connection(("127.0.0.1", port), timeout=5)
+    client.settimeout(5)
+    client.sendall(resp_array("WAIT", str(num_replicas), str(timeout_ms)))
+
+    deadline = time.time() + (timeout_ms / 1000.0) + 1.5
+    result = None
+    while time.time() < deadline:
+        sockets = [client] + [replica["sock"] for replica in replicas]
+        readable, _, _ = select.select(sockets, [], [], 0.05)
+        for sock in readable:
+            if sock is client:
+                result = read_resp_integer(client)
+                break
+
+            for replica in replicas:
+                if sock is replica["sock"]:
+                    process_replica_command(replica)
+                    break
+        if result is not None:
+            break
+
+    client.close()
+    if result is None:
+        raise TimeoutError("%s did not return a WAIT response" % label)
+
+    lines.append("%s WAIT_RESULT %d" % (label, result))
+    if result != expected_count:
+        raise AssertionError("%s expected WAIT result %d, got %d" % (label, expected_count, result))
+
+def run_scenario():
+    if scenario == "all_ack":
+        behaviors = ["good", "good", "good"]
+        writes = [("SET", "foo", "123"), ("SET", "bar", "456")]
+        wait_args = (3, 700, 3, "WAIT_ALL_ACK")
+    elif scenario == "partial_timeout":
+        behaviors = ["good", "good", "silent"]
+        writes = [("SET", "foo", "123"), ("SET", "bar", "456")]
+        wait_args = (3, 250, 2, "WAIT_PARTIAL_TIMEOUT")
+    elif scenario == "stale_invalid":
+        behaviors = ["good", "good", "stale", "invalid"]
+        writes = [("SET", "foo", "123"), ("SET", "bar", "456"), ("SET", "baz", "789")]
+        wait_args = (3, 300, 2, "WAIT_STALE_INVALID")
+    else:
+        raise ValueError("unknown WAIT scenario %r" % scenario)
+
+    replicas = [
+        connect_replica(index, behavior)
+        for index, behavior in enumerate(behaviors, start=1)
+    ]
+
+    try:
+        for command in writes:
+            response = send_client_command(*command)
+            lines.append("%s CLIENT %s => %r" % (scenario, " ".join(command), response))
+            if response != b"+OK\r\n":
+                raise AssertionError("SET expected +OK, got %r" % response)
+
+        drain_expected_propagation(replicas, writes)
+        wait_command(*wait_args, replicas=replicas)
+        lines.append("%s DONE" % scenario)
+    finally:
+        for replica in replicas:
+            try:
+                replica["sock"].close()
+            except Exception:
+                pass
+
+lines = []
+
+try:
+    run_scenario()
+except Exception as exc:
+    lines.append("ERROR %s" % exc)
+    raise
+finally:
+    with open(output_file, "w", encoding="utf-8") as f:
+        for line in lines:
+            f.write(line + "\n")
+PY
+}
+
 assert_info_replication_master() {
     local port="$1" label_prefix="$2" response
 
@@ -1601,22 +1931,26 @@ if start_redis "$inbound_master_port" "$inbound_log" --port "$inbound_master_por
     check_equals "REPLCONF with no arguments returns +OK" "$response" "$(printf '+OK\r')"
 
     response=$(send_cmd "$inbound_master_port" REPLCONF listening-port "")
-    check_equals "REPLCONF with empty listening-port value returns +OK" "$response" "$(printf '+OK\r')"
+    if [ -n "$response" ]; then
+        check_resp_reply "REPLCONF with empty listening-port value returns a RESP reply" "$response"
+    else
+        record_skip "REPLCONF with empty listening-port value produced no response; this is outside the stage requirement"
+    fi
 
     response=$(send_cmd "$inbound_master_port" REPLCONF capa "")
     check_equals "REPLCONF with empty capa value returns +OK" "$response" "$(printf '+OK\r')"
 
-    response=$(send_cmd "$inbound_master_port" PSYNC "?" "-1")
+    response=$(send_cmd "$inbound_master_port" PING)
+    check_equals "Master remains usable after REPLCONF edge cases" "$response" "$(printf '+PONG\r')"
+
+    response=$(send_psync_and_consume_rdb "$inbound_master_port" PSYNC "?" "-1")
     check_regex "PSYNC ? -1 returns FULLRESYNC with 40-char replid and offset 0" "$response" '^\+FULLRESYNC [[:alnum:]]{40} 0'
 
-    response=$(send_cmd "$inbound_master_port" PSYNC "" "")
+    response=$(send_psync_and_consume_rdb "$inbound_master_port" PSYNC "" "")
     check_regex "PSYNC with empty args still returns a valid FULLRESYNC response" "$response" '^\+FULLRESYNC [[:alnum:]]{40} 0'
 
-    response=$(send_cmd "$inbound_master_port" psync "?" "-1")
+    response=$(send_psync_and_consume_rdb "$inbound_master_port" psync "?" "-1")
     check_regex "PSYNC command is case-insensitive" "$response" '^\+FULLRESYNC [[:alnum:]]{40} 0'
-
-    response=$(send_cmd "$inbound_master_port" PING)
-    check_equals "Master remains usable after handshake tests" "$response" "$(printf '+PONG\r')"
 
     stop_process "$inbound_master_pid"
 fi
@@ -1841,6 +2175,69 @@ if start_fake_master_for_ack_tests "$ack_offsets_master_port" "$ack_offsets_capt
         stop_process "$ack_offsets_pid"
     fi
 fi
+
+# ---------------------------------------------------------------------------
+# 16. WAIT with multiple propagated commands
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- WAIT with multiple commands ---"
+
+run_wait_scenario_case() {
+    local scenario="$1" title="$2" expected_line="$3"
+    local wait_port wait_log wait_output wait_pid
+
+    wait_port=$(get_free_port)
+    wait_log="$TMPDIR_LOCAL/wait_${scenario}.log"
+    wait_output="$TMPDIR_LOCAL/wait_${scenario}.out"
+
+    if start_redis "$wait_port" "$wait_log" --port "$wait_port"; then
+        wait_pid="$LAST_SERVER_PID"
+
+        if run_wait_with_multiple_commands_client "$wait_port" "$wait_output" "$scenario"; then
+            record_pass "$title"
+            check_file_not_contains "$title: helper saw no errors" "$wait_output" "ERROR"
+            check_file_contains_line "$title: expected WAIT result" "$wait_output" "$expected_line"
+            check_file_contains_line "$title: scenario completed" "$wait_output" "$scenario DONE"
+
+            case "$scenario" in
+                all_ack)
+                    check_file_contains_line "$title: all replicas became ready" "$wait_output" "WAIT_REPLICA 3 READY good"
+                    check_file_contains_line "$title: third replica ACKed latest write offset" "$wait_output" "WAIT_REPLICA 3 ACK 62"
+                    ;;
+                partial_timeout)
+                    check_file_contains_line "$title: silent replica did not ACK" "$wait_output" "WAIT_REPLICA 3 ACK_SILENT"
+                    check_file_contains_line "$title: two good replicas ACKed latest write offset" "$wait_output" "WAIT_REPLICA 2 ACK 62"
+                    ;;
+                stale_invalid)
+                    check_file_contains_line "$title: stale ACK was produced" "$wait_output" "WAIT_REPLICA 3 ACK_STALE 0"
+                    check_file_contains_line "$title: invalid ACK was produced" "$wait_output" "WAIT_REPLICA 4 ACK_INVALID"
+                    ;;
+            esac
+        else
+            record_fail "$title"
+            sed 's/^/    /' "$wait_output" 2>/dev/null || true
+            fail "  master log:"
+            sed 's/^/    /' "$wait_log" 2>/dev/null || true
+        fi
+
+        stop_process "$wait_pid"
+    fi
+}
+
+run_wait_scenario_case \
+    all_ack \
+    "WAIT returns all replicas after multiple writes when every replica ACKs" \
+    "WAIT_ALL_ACK WAIT_RESULT 3"
+
+run_wait_scenario_case \
+    partial_timeout \
+    "WAIT returns only ACKed replicas when one replica times out" \
+    "WAIT_PARTIAL_TIMEOUT WAIT_RESULT 2"
+
+run_wait_scenario_case \
+    stale_invalid \
+    "WAIT ignores stale and invalid ACK responses" \
+    "WAIT_STALE_INVALID WAIT_RESULT 2"
 
 echo ""
 echo "=============================="

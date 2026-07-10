@@ -22,64 +22,46 @@ RESPValue RequestHandler::executeCommand(const string &cmd, const RESPArray &arr
 
     if(cmd == "PING")
         res = handlePing();
-
     else if(cmd == "ECHO")
         res = handleEcho(arr);
-
     else if(cmd == "SET")
         res = handleSet(arr);
-
     else if(cmd == "GET")
         res = handleGet(arr);
-
     else if(cmd == "RPUSH")
         res = handleRpush(arr);
-
     else if(cmd == "LPUSH")
         res = handleLpush(arr);
-
     else if(cmd == "LRANGE")
         res = handleLrange(arr);
-
     else if(cmd == "LLEN")
         res = handleLlen(arr);
-
     else if(cmd == "LPOP")
         res = handleLpop(arr);
-
     else if(cmd == "BLPOP")
         res = handleBlpop(arr);
-
     else if(cmd == "TYPE")
         res = handleType(arr);
-
     else if(cmd == "XADD")
         res = handleXadd(arr);
-
     else if(cmd == "XRANGE")
         res = handleXrange(arr);
-
     else if(cmd == "XREAD")
         res = handleXread(arr);
-
     else if(cmd == "INCR")
         res = handleIncr(arr);
-
     else if(cmd == "WATCH")
         res = handleWatch(arr);
-
     else if(cmd == "UNWATCH")
         res = handleUnwatch(arr);
-
     else if(cmd == "INFO")
         res = handleInfo(arr);
-
     else if(cmd == "REPLCONF")
         res = handleReplConf(arr);
-
     else if(cmd == "PSYNC")
         res = handlePsync(arr);
-
+    else if(cmd == "WAIT")
+        res = handleWait(arr);
     else
         res = {"ERR unkown command", '-'};
 
@@ -617,6 +599,19 @@ RESPValue RequestHandler::handleReplConf(const RESPArray &arr) {
                 return {ack, '*'};
             }
         }
+    } else {
+        if(arr.size() >= 3) {
+            string sub = get<string>(arr[1].value);
+            toUpper(sub);
+            if(sub == "ACK") {
+                long long offset = 0;
+                try {
+                    offset = stoll(get<string>(arr[2].value));
+                } catch (...) {}
+
+                replication.updateAcknowledgeOffset(clientFd, offset);
+            }
+        }
     }
 
     return {"OK", '+'};
@@ -628,4 +623,21 @@ RESPValue RequestHandler::handlePsync(const RESPArray &arr) {
     replication.addReplica(clientFd);
 
     return {reply, '+'};
+}
+
+RESPValue RequestHandler::handleWait(const RESPArray &arr) {
+    if(arr.size() != 3)
+        return {"ERR wrong number of arguments.", '-'};
+
+    long long numReplicas, timeoutMs;
+    try {
+        numReplicas = stoll(get<string>(arr[1].value));
+        timeoutMs = stoll(get<string>(arr[2].value));
+    } catch (...) {
+        return {"ERR value is not an integer or out of range", '-'};
+    }
+
+    int acked = replication.waitForAcks((int)numReplicas, timeoutMs);
+
+    return {(long long)acked, ':'};
 }
