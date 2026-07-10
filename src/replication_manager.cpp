@@ -29,27 +29,23 @@ void ReplicationManager::removeReplica(int clientFd) {
 }
 
 void ReplicationManager::propagate(const RESPArray &arr) {
-    cout << "Propagating to " << replicaSockets.size() << " clients\n";
     const string bytes = serializer.serialize({arr, '*'});
 
     vector<int> fds;
     {
         lock_guard<mutex> lock(replicaMtx);
         masterOffset += bytes.size();
-        cout << "masterOffset = " << masterOffset << endl;
         pendingWrites = true;
         for(auto &replica : replicaSockets)
             fds.push_back(replica.clientFd);
     }
 
     for(auto &fd : fds) {
-        cout << "Sending to " << fd << endl;
         send_msg(bytes, fd);
     }
 }
 
 void ReplicationManager::updateAcknowledgeOffset(int clientFd, long long offset) {
-    cout << clientFd << " ACK " << offset << endl;
     {
         lock_guard<mutex> lock(replicaMtx);
         for(auto &replica : replicaSockets) {
@@ -63,7 +59,6 @@ void ReplicationManager::updateAcknowledgeOffset(int clientFd, long long offset)
 }
 
 int ReplicationManager::waitForAcks(int numReplicas, long long timeoutMs) {
-    cout << "Entered waitForAcks()" << endl;
     long long targetOffset;
     vector<int> fds;
     {
@@ -80,8 +75,6 @@ int ReplicationManager::waitForAcks(int numReplicas, long long timeoutMs) {
         lock_guard<mutex> lock(replicaMtx);
         return (int)replicaSockets.size();
     }
-
-    cout << "Sending GETACK" << endl;
 
     RESPArray getack = {
         RESPValue{"REPLCONF", '$'},

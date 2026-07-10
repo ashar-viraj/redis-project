@@ -27,6 +27,5 @@ void send_msg(const string &message, int clientFd)
             return;
 
         total_sent += static_cast<size_t>(byte_sent);
-        cout << "Sent : " << total_sent << endl;
     }
 }

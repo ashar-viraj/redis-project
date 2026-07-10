@@ -489,8 +489,6 @@ optional<StreamType> Store::xread(const string &key, const string &idStr) {
 
     StreamType result(startItr, stream->end());
 
-    // cout << "Result size : " << result.size() << endl;
-
     return result;
 }
 

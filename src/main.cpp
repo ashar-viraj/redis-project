@@ -65,7 +65,6 @@ void consumeCommands(int sock_fd,
     RESPValue req;
 
     try {
-      cout << "===================Request pending===================\n" << escapeRESP(pending) << endl;
       req = parser.parse(pending, bytesConsumed);
     } catch (const exception &e) {
       string msg = e.what();
@@ -112,8 +111,6 @@ void consumeCommands(int sock_fd,
       RESPValue res = handler.handle(req);
 
       resStr = serializer.serialize(res);
-      cout << "=============Recieved=============\n";
-      cout << resStr << endl;
     } catch (const exception &e) {
       resStr = "-" + string(e.what()) + "\r\n";
     } catch (...) {
@@ -200,7 +197,6 @@ bool consumeFullResyncAndRdb(int sock_fd, string &pending) {
   }
   string fullresyncLine = pending.substr(0, lineEnd);
   pending.erase(0, lineEnd + 2);
-  cout << "Handshake reply: " << fullresyncLine << endl;
 
   // 2) Consume the "$<length>\r\n" header describing the RDB payload.
   size_t hdrEnd;
@@ -222,7 +218,6 @@ bool consumeFullResyncAndRdb(int sock_fd, string &pending) {
   }
   pending.erase(0, rdbLen);
 
-  cout << "Consumed RDB payload (" << rdbLen << " bytes)\n";
   return true;
 }
 
@@ -325,13 +320,9 @@ bool connectToMaster(Config &config, RESPSerializer &serializer, string &pending
   string lastReceived;
 
   auto sendAndReceive = [&](const RESPArray &cmd) {
-    // cout << "===========Sending==========="<< endl;
-    // cout << escapeRESP(serializer.serialize({cmd, '*'})) << endl;
     send_msg(serializer.serialize({cmd, '*'}), config.masterFd);
     
     string recieved = receive_msg(config.masterFd);
-    // cout << "===========Recieved==========="<< endl;
-    // cout << escapeRESP(recieved) << endl;
     if (recieved.empty()) {
       // cout << "Connection closed by master.\n";
       close(config.masterFd);
@@ -346,7 +337,6 @@ bool connectToMaster(Config &config, RESPSerializer &serializer, string &pending
     return false;
 
   // REPLCONF listening-port <port>
-  // cout << "Config port : " << config.port << endl;
   if (!sendAndReceive({RESPValue("REPLCONF", '$'),
                        RESPValue("listening-port", '$'),
                        RESPValue(to_string(config.port), '$')}))

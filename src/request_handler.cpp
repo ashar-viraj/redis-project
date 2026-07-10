@@ -65,16 +65,13 @@ RESPValue RequestHandler::executeCommand(const string &cmd, const RESPArray &arr
     else
         res = {"ERR unkown command", '-'};
 
-    if(cmd == "SET" || cmd == "" || cmd == "UNWATCH" || cmd == "WATCH" || cmd == "INCR" || cmd == "XADD" || cmd == "BLPOP" || cmd == "LPOP" || cmd == "RPUSH" || cmd == "LPUSH") {
-        cout << "Sending for propagate.\n";
+    if(cmd == "SET" || cmd == "" || cmd == "UNWATCH" || cmd == "WATCH" || cmd == "INCR" || cmd == "XADD" || cmd == "BLPOP" || cmd == "LPOP" || cmd == "RPUSH" || cmd == "LPUSH")
         replication.propagate(arr);
-    }
 
     return res;
 }
 
 RESPValue RequestHandler::handle(const RESPValue &req) {
-    // cout << "Handling Request\n";
     if(req.type != '*')
         throw runtime_error("Command must be array");
 
@@ -85,8 +82,6 @@ RESPValue RequestHandler::handle(const RESPValue &req) {
 
     string cmd = get<string>(arr[0].value);
     toUpper(cmd);
-
-    // cout << "cmd : " << cmd << endl;
 
     if(cmd == "MULTI") {
         state.inTransaction = true;
@@ -619,7 +614,6 @@ RESPValue RequestHandler::handleReplConf(const RESPArray &arr) {
 
 RESPValue RequestHandler::handlePsync(const RESPArray &arr) {
     string reply = "FULLRESYNC " + config.masterReplId + " " + to_string(config.masterReplOffset);
-    cout << "clientFd : " << clientFd << endl;
     replication.addReplica(clientFd);
 
     return {reply, '+'};
