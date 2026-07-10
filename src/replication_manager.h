@@ -30,6 +30,7 @@ public:
     long long getProcessedOffset() const;
     void addProcessedOffset(long long bytes);
     long long getReplicaCount();
+    long long getMasterOffset() const;
 
     void updateAcknowledgeOffset(int clientFd, long long offset);
     int waitForAcks(int numReplicas, long long timeoutMs);

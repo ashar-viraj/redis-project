@@ -127,6 +127,11 @@ long long ReplicationManager::getReplicaCount() {
     return replicaSockets.size();
 }
 
+long long ReplicationManager::getMasterOffset() const {
+    return masterOffset;
+}
+
+
 bool ReplicationManager::isReplicaConnection(int fd) {
     lock_guard<mutex> lock(replicaMtx);
     for(auto &replica : replicaSockets)

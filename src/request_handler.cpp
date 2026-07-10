@@ -571,7 +571,7 @@ RESPValue RequestHandler::handleInfo(const RESPArray &arr)
     {
         string info = config.isReplica ? "role:slave\n" : "role:master\n";
         info += "master_replid:8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb\n";
-        info += "master_repl_offset:0";
+        info += "master_repl_offset:" + to_string(replication.getMasterOffset());
         return {info, '$'};
     }
 
@@ -613,7 +613,7 @@ RESPValue RequestHandler::handleReplConf(const RESPArray &arr) {
 }
 
 RESPValue RequestHandler::handlePsync(const RESPArray &arr) {
-    string reply = "FULLRESYNC " + config.masterReplId + " " + to_string(config.masterReplOffset);
+    string reply = "FULLRESYNC " + config.masterReplId + " " + to_string(replication.getMasterOffset());
     replication.addReplica(clientFd);
 
     return {reply, '+'};
