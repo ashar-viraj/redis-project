@@ -11,6 +11,19 @@ void toUpper(string &s) {
         e = toupper(e);
 }
 
+bool shouldReplicate(const string &cmd) {
+    return cmd == "SET" ||
+            cmd == "" ||
+            cmd == "UNWATCH" ||
+            cmd == "WATCH" ||
+            cmd == "INCR" ||
+            cmd == "XADD" ||
+            cmd == "BLPOP" ||
+            cmd == "LPOP" ||
+            cmd == "RPUSH" ||
+            cmd == "LPUSH";
+}
+
 RequestHandler::RequestHandler(Store &s,
         Config &config,
         ReplicationManager &replication,
@@ -20,52 +33,32 @@ RequestHandler::RequestHandler(Store &s,
 RESPValue RequestHandler::executeCommand(const string &cmd, const RESPArray &arr) {
     RESPValue res;
 
-    if(cmd == "PING")
-        res = handlePing();
-    else if(cmd == "ECHO")
-        res = handleEcho(arr);
-    else if(cmd == "SET")
-        res = handleSet(arr);
-    else if(cmd == "GET")
-        res = handleGet(arr);
-    else if(cmd == "RPUSH")
-        res = handleRpush(arr);
-    else if(cmd == "LPUSH")
-        res = handleLpush(arr);
-    else if(cmd == "LRANGE")
-        res = handleLrange(arr);
-    else if(cmd == "LLEN")
-        res = handleLlen(arr);
-    else if(cmd == "LPOP")
-        res = handleLpop(arr);
-    else if(cmd == "BLPOP")
-        res = handleBlpop(arr);
-    else if(cmd == "TYPE")
-        res = handleType(arr);
-    else if(cmd == "XADD")
-        res = handleXadd(arr);
-    else if(cmd == "XRANGE")
-        res = handleXrange(arr);
-    else if(cmd == "XREAD")
-        res = handleXread(arr);
-    else if(cmd == "INCR")
-        res = handleIncr(arr);
-    else if(cmd == "WATCH")
-        res = handleWatch(arr);
-    else if(cmd == "UNWATCH")
-        res = handleUnwatch(arr);
-    else if(cmd == "INFO")
-        res = handleInfo(arr);
-    else if(cmd == "REPLCONF")
-        res = handleReplConf(arr);
-    else if(cmd == "PSYNC")
-        res = handlePsync(arr);
-    else if(cmd == "WAIT")
-        res = handleWait(arr);
-    else
-        res = {"ERR unkown command", '-'};
+    if(cmd == "PING") res = handlePing();
+    else if(cmd == "ECHO") res = handleEcho(arr);
+    else if(cmd == "SET") res = handleSet(arr);
+    else if(cmd == "GET") res = handleGet(arr);
+    else if(cmd == "RPUSH") res = handleRpush(arr);
+    else if(cmd == "LPUSH") res = handleLpush(arr);
+    else if(cmd == "LRANGE") res = handleLrange(arr);
+    else if(cmd == "LLEN") res = handleLlen(arr);
+    else if(cmd == "LPOP") res = handleLpop(arr);
+    else if(cmd == "BLPOP") res = handleBlpop(arr);
+    else if(cmd == "TYPE") res = handleType(arr);
+    else if(cmd == "XADD") res = handleXadd(arr);
+    else if(cmd == "XRANGE") res = handleXrange(arr);
+    else if(cmd == "XREAD") res = handleXread(arr);
+    else if(cmd == "INCR") res = handleIncr(arr);
+    else if(cmd == "WATCH") res = handleWatch(arr);
+    else if(cmd == "UNWATCH") res = handleUnwatch(arr);
+    else if(cmd == "INFO") res = handleInfo(arr);
+    else if(cmd == "REPLCONF") res = handleReplConf(arr);
+    else if(cmd == "PSYNC") res = handlePsync(arr);
+    else if(cmd == "WAIT") res = handleWait(arr);
+    else if(cmd == "CONFIG") res = handleConfig(arr);
+    else if(cmd == "KEYS") res = handleKeys(arr);
+    else res = {"ERR unkown command", '-'};
 
-    if(cmd == "SET" || cmd == "" || cmd == "UNWATCH" || cmd == "WATCH" || cmd == "INCR" || cmd == "XADD" || cmd == "BLPOP" || cmd == "LPOP" || cmd == "RPUSH" || cmd == "LPUSH")
+    if(shouldReplicate(cmd))
         replication.propagate(arr);
 
     return res;
@@ -634,4 +627,48 @@ RESPValue RequestHandler::handleWait(const RESPArray &arr) {
     int acked = replication.waitForAcks((int)numReplicas, timeoutMs);
 
     return {(long long)acked, ':'};
+}
+
+RESPValue RequestHandler::handleConfig(const RESPArray &arr) {
+    if(arr.size() != 3)
+        return {"ERR wrong number of arguments.", '-'};
+
+    string sub = get<string>(arr[1].value);
+    toUpper(sub);
+
+    if(sub == "GET") {
+        RESPArray res;
+        string param = get<string>(arr[2].value);
+        if(param == "dir") {
+            res = {
+                {"dir", '$'},
+                {config.dir , '$'}
+            };
+        } else if(param == "dbfilename") {
+            res = {
+                {"dbfilename", '$'},
+                {config.dbFileName, '$'}
+            };
+        }
+
+        return {res, '*'};
+    }
+
+    return {"ERR unsupported CONFIG subcommand", '+'};
+}
+
+RESPValue RequestHandler::handleKeys(const RESPArray &arr) {
+    if(arr.size() != 2)
+        return {"ERR wrong number of arguments.", '-'};
+
+    string pattern = get<string>(arr[1].value);
+
+    if(pattern != "*")
+        return {"ERR only * is supported", '-'};
+
+    vector<string> keys = store.getkeys();
+    RESPArray res;
+    for(auto &key : keys)
+        res.push_back({key, '$'});
+    return {res, '*'};
 }

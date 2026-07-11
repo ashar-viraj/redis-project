@@ -19,6 +19,7 @@
 #include "request_handler.h"
 #include "RESP/resp_parser.h"
 #include "RESP/resp_serializer.h"
+#include "RDB/rdb_parser.h"
 
 using namespace std;
 
@@ -394,12 +395,24 @@ int main(int argc, char **argv)
               config.masterPort = stoi(argv[++i]);
       }
     }
+    else if(arg == "--dir" && i+1 < argc) {
+      config.dir = argv[++i];
+    } else if(arg == "--dbfilename" && i+1 < argc) {
+      config.dbFileName = argv[++i];
+    }
   }
 
   RESPSerializer serializer;
   RESPParser parser;
   Store store;
   ReplicationManager replication(serializer);
+  RDBParser rdbParser;
+
+  if(!config.dir.empty() && !config.dbFileName.empty()) {
+    RDBParser rdbParser;
+    string rdbPath = config.dir + "/" + config.dbFileName;
+    rdbParser.load(rdbPath, store);
+  }
 
   if(config.isReplica) {
     string masterPending;

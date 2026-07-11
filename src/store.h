@@ -82,4 +82,5 @@ public:
     optional<long long> incr(const string &key);
     void markKeyAsModified(const string &key);
     uint64_t getKeyVersion(const string &key);
+    vector<string> getkeys();
 };

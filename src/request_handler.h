@@ -13,6 +13,7 @@ struct ClientState {
 };
 
 void toUpper(string &s);
+bool shouldReplicate(const string &cmd);
 
 class RequestHandler{
 private:
@@ -54,4 +55,7 @@ private:
     RESPValue handleReplConf(const RESPArray &arr);
     RESPValue handlePsync(const RESPArray &arr);
     RESPValue handleWait(const RESPArray &arr);
+
+    RESPValue handleConfig(const RESPArray &arr);
+    RESPValue handleKeys(const RESPArray &arr);
 };

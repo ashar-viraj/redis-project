@@ -658,3 +658,10 @@ optional<long long> Store::incr(const string &key) {
     return nullopt;
 }
 
+vector<string> Store::getkeys() {
+    lock_guard lock(storeMutex);
+    vector<string> keys;
+    for(auto &[key, _] : kv)
+        keys.push_back(key);
+    return keys;
+}
