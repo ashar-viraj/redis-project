@@ -1,4 +1,5 @@
 #pragma once
+#include "./AOF/aof_manager.h"
 #include "RESP/resp_parser.h"
 #include "RESP/resp_serializer.h"
 #include "replication_manager.h"
@@ -20,10 +21,12 @@ private:
     Store &store;
     Config &config;
     int clientFd;
+    AOFManager &aof;
     ReplicationManager &replication;
+    bool replaying = false;
 
 public:
-    RequestHandler(Store &store, Config &config, ReplicationManager &replication, int fd);
+    RequestHandler(Store &store, Config &config, ReplicationManager &replication, AOFManager &aof, int fd, bool replaying = false);
     RESPValue handle(const RESPValue &req);
     ClientState state;
 

@@ -16,4 +16,9 @@ struct Config {
     string dbFileName;
 
     int masterFd = -1;
+
+    bool appendOnly = false;
+    string appendDirName = "appendonlydir";
+    string appendFileName = "appendonly.aof";
+    string appendFsync = "everysec";
 };

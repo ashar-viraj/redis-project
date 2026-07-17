@@ -16,11 +16,11 @@ string RESPParser::arrayToString(char buffer[])
 }
 
 // NEW SIGNATURE: takes the accumulated stream buffer and hands back how many bytes were consumed to produce this one RESPValue. The caller is responsible for erasing exactly that many bytes from its pending buffer before calling parse() again for the next command in the stream.
-RESPValue RESPParser::parse(const string &buffer, size_t &bytesConsumed)
+RESPValue RESPParser::parse(const string &buffer, size_t &bytesConsumed, size_t start)
 {
-    int idx = 0;
+    int idx = static_cast<int>(start);
     RESPValue value = parseValue(buffer, idx);
-    bytesConsumed = static_cast<size_t>(idx);
+    bytesConsumed = static_cast<size_t>(idx) - start;
     return value;
 }
 

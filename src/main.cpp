@@ -1,17 +1,20 @@
-#include <iostream>
-#include <cstdlib>
-#include <string>
-#include <cstring>
-#include <unistd.h>
-#include <sys/types.h>
-#include <sys/socket.h>
 #include <arpa/inet.h>
-#include <netdb.h>
-#include <thread>
-#include <vector>
 #include <cerrno>
 #include <csignal>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <netdb.h>
+#include <string>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <thread>
+#include <unistd.h>
+#include <vector>
 
+#include "./AOF/aof_manager.h"
 #include "config.h"
 #include "empty_rdb.h"
 #include "network_utils.h"
@@ -228,8 +231,9 @@ void handleClient(int client_fd,
                 Store &store,
                 RESPSerializer &serializer,
                 ReplicationManager &replication,
+                AOFManager &aof,
                 Config &config) {
-  RequestHandler handler(store, config, replication, client_fd);
+  RequestHandler handler(store, config, replication, aof, client_fd);
 
   string pending;
   while (processIncomingStream(client_fd, pending, parser, handler, serializer, config, replication, /*sendResponse=*/true)) {
@@ -246,8 +250,9 @@ void receiveFromMaster(RESPParser &parser,
                       RESPSerializer &serializer,
                       ReplicationManager &replication,
                       Config &config,
+                      AOFManager &aof,
                       string pending) {
-  RequestHandler handler(store, config, replication, config.masterFd);
+  RequestHandler handler(store, config, replication, aof, config.masterFd);
 
   try {
     if (!consumeFullResyncAndRdb(config.masterFd, pending)) {
@@ -323,14 +328,14 @@ bool connectToMaster(Config &config, RESPSerializer &serializer, string &pending
   auto sendAndReceive = [&](const RESPArray &cmd) {
     send_msg(serializer.serialize({cmd, '*'}), config.masterFd);
     
-    string recieved = receive_msg(config.masterFd);
-    if (recieved.empty()) {
+    string received = receive_msg(config.masterFd);
+    if (received.empty()) {
       // cout << "Connection closed by master.\n";
       close(config.masterFd);
       config.masterFd = -1;
       return false;
     }
-    lastReceived = recieved;
+    lastReceived = received;
     return true;
   };
 
@@ -372,13 +377,14 @@ int main(int argc, char **argv)
 
   Config config;
 
+  config.dir = filesystem::current_path().string();
+
   for(int i = 1; i < argc; i++) {
     string arg = argv[i];
 
     if(arg == "--port" && i + 1 < argc)
       config.port = stoi(argv[++i]);
-
-    if (arg == "--replicaof" && i + 1 < argc) {
+    else if (arg == "--replicaof" && i + 1 < argc) {
       config.isReplica = true;
 
       string replicaArg = argv[++i];
@@ -399,6 +405,16 @@ int main(int argc, char **argv)
       config.dir = argv[++i];
     } else if(arg == "--dbfilename" && i+1 < argc) {
       config.dbFileName = argv[++i];
+    } else if(arg == "--appendonly" && i+1 < argc) {
+      string paramVal = argv[++i];
+      toUpper(paramVal);
+      config.appendOnly = (paramVal == "YES");
+    } else if(arg == "--appenddirname" && i+1 < argc) {
+      config.appendDirName = argv[++i];
+    } else if(arg == "--appendfilename" && i+1 < argc) {
+      config.appendFileName = argv[++i];
+    } else if(arg == "--appendfsync" && i+1 < argc) {
+      config.appendFsync = argv[++i];
     }
   }
 
@@ -407,6 +423,12 @@ int main(int argc, char **argv)
   Store store;
   ReplicationManager replication(serializer);
   RDBParser rdbParser;
+  AOFManager aof(config, serializer);
+
+  if(config.appendOnly) {
+    aof.initialize();
+    aof.replay(store, replication);
+  }
 
   if(!config.dir.empty() && !config.dbFileName.empty()) {
     RDBParser rdbParser;
@@ -420,7 +442,7 @@ int main(int argc, char **argv)
       cerr << "Failed to connect to master\n";
       return 1;
     }
-    thread(receiveFromMaster, ref(parser), ref(store), ref(serializer), ref(replication), ref(config), masterPending).detach();
+    thread(receiveFromMaster, ref(parser), ref(store), ref(serializer), ref(replication), ref(config), ref(aof), masterPending).detach();
   }
 
 
@@ -476,7 +498,7 @@ int main(int argc, char **argv)
       continue;
     }
     // std::cout << "Client connected\n";
-    thread(handleClient, client_fd, ref(parser), ref(store), ref(serializer), ref(replication), ref(config)).detach();
+    thread(handleClient, client_fd, ref(parser), ref(store), ref(serializer), ref(replication), ref(aof), ref(config)).detach();
 
     // handleClient(client_fd);
   }

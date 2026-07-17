@@ -24,11 +24,17 @@ bool shouldReplicate(const string &cmd) {
             cmd == "LPUSH";
 }
 
+bool shouldWriteAOF(const string &cmd) {
+    return shouldReplicate(cmd);
+}
+
 RequestHandler::RequestHandler(Store &s,
         Config &config,
         ReplicationManager &replication,
-        int fd)
-        : store(s), config(config), replication(replication), clientFd(fd) { }
+        AOFManager &aof,
+        int fd,
+        bool replaying)
+        : store(s), config(config), replication(replication), aof(aof), clientFd(fd), replaying(replaying) { }
 
 RESPValue RequestHandler::executeCommand(const string &cmd, const RESPArray &arr) {
     RESPValue res;
@@ -58,8 +64,13 @@ RESPValue RequestHandler::executeCommand(const string &cmd, const RESPArray &arr
     else if(cmd == "KEYS") res = handleKeys(arr);
     else res = {"ERR unkown command", '-'};
 
-    if(shouldReplicate(cmd))
-        replication.propagate(arr);
+    if(!replaying){
+        if(shouldReplicate(cmd))
+            replication.propagate(arr);
+
+        if(config.appendOnly && shouldWriteAOF(cmd))
+            aof.append(arr);
+    }
 
     return res;
 }
@@ -648,6 +659,26 @@ RESPValue RequestHandler::handleConfig(const RESPArray &arr) {
             res = {
                 {"dbfilename", '$'},
                 {config.dbFileName, '$'}
+            };
+        } else if(param == "appendonly") {
+            res = {
+                {"appendonly", '$'},
+                {config.appendOnly ? "yes" : "no", '$'}
+            };
+        } else if(param == "appenddirname") {
+            res = {
+                {"appenddirname", '$'},
+                {config.appendDirName, '$'}
+            };
+        } else if(param == "appendfilename") {
+            res = {
+                {"appendfilename", '$'},
+                {config.appendFileName, '$'}
+            };
+        } else if(param == "appendfsync") {
+            res = {
+                {"appendfsync", '$'},
+                {config.appendFsync, '$'}
             };
         }
 
