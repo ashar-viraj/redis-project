@@ -11,6 +11,7 @@
 #include <mutex>
 #include <memory>
 #include <vector>
+#include <set>
 
 using namespace std;
 
@@ -63,9 +64,12 @@ private:
     map<string, deque<shared_ptr<StreamWaitingClient>>> streamWaiting;
     mutex storeMutex;
     map<string, uint64_t> keyVersion;
+    map<string, set<int>> channelSubscribers;
+    map<int, set<string>> clientSubscriptions;
+
 public:
     Iterator findValidKey(const string& key);
-    void set(const string &key, const string &value, optional<long long> px);
+    void setValue(const string &key, const string &value, optional<long long> px);
     optional<string> get(const string &key);
     long long rpush(const string &key, const string &value);
     long long lpush(const string &key, const string &value);
@@ -83,4 +87,8 @@ public:
     void markKeyAsModified(const string &key);
     uint64_t getKeyVersion(const string &key);
     vector<string> getkeys();
+
+    long long subscribe(int clinetFd, const string &channel);
+    long long unsubscribe(int clientFd, const string &channel);
+    vector<int> getSubscribers(const string &channel);
 };

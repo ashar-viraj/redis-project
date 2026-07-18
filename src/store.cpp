@@ -143,7 +143,7 @@ Store::Iterator Store::findValidKey(const string& key) {
 
 // Implementations
 
-void Store::set(const string &key, const string &value, optional<long long> px) {
+void Store::setValue(const string &key, const string &value, optional<long long> px) {
     lock_guard lock(storeMutex);
 
     ValueEntry entry;
@@ -664,4 +664,46 @@ vector<string> Store::getkeys() {
     for(auto &[key, _] : kv)
         keys.push_back(key);
     return keys;
+}
+
+long long Store::subscribe(int clientFd, const string &channel) {
+    lock_guard lock(storeMutex);
+
+    channelSubscribers[channel].insert(clientFd);
+    clientSubscriptions[clientFd].insert(channel);
+
+    return clientSubscriptions[clientFd].size();
+}
+
+long long Store::unsubscribe(int clientFd, const string &channel) {
+    lock_guard lock(storeMutex);
+
+    channelSubscribers[channel].erase(clientFd);
+    clientSubscriptions[clientFd].erase(channel);
+
+    if(channelSubscribers[channel].empty())
+        channelSubscribers.erase(channel);
+    if(clientSubscriptions[clientFd].empty())
+    {
+        clientSubscriptions.erase(clientFd);
+        return 0ll;
+    }
+
+    return clientSubscriptions[clientFd].size();
+}
+
+vector<int> Store::getSubscribers(const string &channel) {
+    lock_guard lock(storeMutex);
+
+    vector<int> subscribers;
+    auto itr = channelSubscribers.find(channel);
+
+    if(itr == channelSubscribers.end())
+        return subscribers;
+
+    subscribers.reserve(itr->second.size());
+    for(auto &sub : itr->second)
+        subscribers.push_back(sub);
+
+    return subscribers;
 }

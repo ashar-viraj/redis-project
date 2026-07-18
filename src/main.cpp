@@ -233,7 +233,7 @@ void handleClient(int client_fd,
                 ReplicationManager &replication,
                 AOFManager &aof,
                 Config &config) {
-  RequestHandler handler(store, config, replication, aof, client_fd);
+  RequestHandler handler(store, serializer, config, replication, aof, client_fd);
 
   string pending;
   while (processIncomingStream(client_fd, pending, parser, handler, serializer, config, replication, /*sendResponse=*/true)) {
@@ -252,7 +252,7 @@ void receiveFromMaster(RESPParser &parser,
                       Config &config,
                       AOFManager &aof,
                       string pending) {
-  RequestHandler handler(store, config, replication, aof, config.masterFd);
+  RequestHandler handler(store, serializer, config, replication, aof, config.masterFd);
 
   try {
     if (!consumeFullResyncAndRdb(config.masterFd, pending)) {

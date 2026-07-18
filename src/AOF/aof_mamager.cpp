@@ -77,7 +77,7 @@ void AOFManager::append(const RESPArray &cmd) {
 
 void AOFManager::replay(Store &store, ReplicationManager &replication) {
     RESPParser parser;
-    RequestHandler handler(store, config, replication, *this, -1, true);
+    RequestHandler handler(store, serializer, config, replication, *this, -1, true);
 
     filesystem::path path = filesystem::path(config.dir) /
                             config.appendDirName /

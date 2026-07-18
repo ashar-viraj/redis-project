@@ -11,6 +11,7 @@ struct ClientState {
     bool inTransaction = false;
     vector<RESPArray> queuedCommands;
     unordered_map<string, uint64_t> watchedKeys;
+    bool subscribedMode = false;
 };
 
 void toUpper(string &s);
@@ -23,10 +24,11 @@ private:
     int clientFd;
     AOFManager &aof;
     ReplicationManager &replication;
+    RESPSerializer &serializer;
     bool replaying = false;
 
 public:
-    RequestHandler(Store &store, Config &config, ReplicationManager &replication, AOFManager &aof, int fd, bool replaying = false);
+    RequestHandler(Store &store, RESPSerializer &serializer, Config &config, ReplicationManager &replication, AOFManager &aof, int fd, bool replaying = false);
     RESPValue handle(const RESPValue &req);
     ClientState state;
 
@@ -61,4 +63,8 @@ private:
 
     RESPValue handleConfig(const RESPArray &arr);
     RESPValue handleKeys(const RESPArray &arr);
+
+    RESPValue handleSubscribe(const RESPArray &arr);
+    RESPValue handleUnsubscribe(const RESPArray &arr);
+    RESPValue handlePublish(const RESPArray &arr);
 };

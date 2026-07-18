@@ -9,6 +9,9 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <thread>
+#include <mutex>
+#include <atomic>
 
 static std::string encodeRESP(const std::vector<std::string> &tokens)
 {
@@ -100,6 +103,15 @@ static void printIndent(int n)
 {
     std::cout << std::string(n, ' ');
 }
+
+// Guards std::cout so the receiver thread and the main thread don't
+// interleave partial writes.
+static std::mutex g_coutMutex;
+
+// Set to false once the connection should be torn down (EOF from the
+// user, socket closed by the server, quit command, etc.) so both
+// threads know to stop.
+static std::atomic<bool> g_running{true};
 
 struct RespValue {
     enum Type { SIMPLE, ERROR, INTEGER, BULK, ARRAY, NIL } type;
@@ -253,8 +265,11 @@ static bool readResponse(int fd)
 {
     RespValue v;
     if (!parseResp(fd, v)) return false;
+
+    std::lock_guard<std::mutex> lock(g_coutMutex);
     printPretty(v);
     std::cout << "\n";
+    std::cout.flush();
     return true;
 }
 
@@ -284,11 +299,35 @@ int main(int argc, char **argv)
     std::cout << "Connected to " << host << ":" << port << "\n";
     std::cout << "Type Redis commands (e.g. SET foo bar, GET foo, PING). Ctrl+D to exit.\n\n";
 
+    // The server can push data at any time (Pub/Sub messages, for example),
+    // not just as a reply to something we just sent. So reading the socket
+    // can't be tied to "we just sent a command" - it has to run continuously
+    // on its own thread, independent of when the user types something.
+    std::thread receiver([&]() {
+        while (g_running.load())
+        {
+            if (!readResponse(fd))
+            {
+                if (g_running.exchange(false))
+                {
+                    std::lock_guard<std::mutex> lock(g_coutMutex);
+                    std::cout << "\nConnection closed by server\n";
+                }
+                // Unblock a getline() that may be waiting on stdin.
+                shutdown(fd, SHUT_RDWR);
+                break;
+            }
+        }
+    });
+
     std::string line;
-    while (true)
+    while (g_running.load())
     {
-        std::cout << host << ":" << port << "> ";
-        std::cout.flush();
+        {
+            std::lock_guard<std::mutex> lock(g_coutMutex);
+            std::cout << host << ":" << port << "> ";
+            std::cout.flush();
+        }
 
         if (!std::getline(std::cin, line)) break;
         if (line.empty()) continue;
@@ -300,16 +339,20 @@ int main(int argc, char **argv)
         std::string req = encodeRESP(tokens);
         if (!sendAll(fd, req))
         {
+            std::lock_guard<std::mutex> lock(g_coutMutex);
             std::cerr << "Send failed\n";
             break;
         }
-
-        if (!readResponse(fd))
-        {
-            std::cerr << "Connection closed\n";
-            break;
-        }
+        // No readResponse() call here: the receiver thread owns all
+        // reading from the socket now, whether it's the reply to this
+        // command or an unsolicited Pub/Sub message that shows up later.
     }
+
+    // Tell the receiver thread to stop and wake it up if it's blocked
+    // in recv().
+    g_running.store(false);
+    shutdown(fd, SHUT_RDWR);
+    receiver.join();
 
     close(fd);
     return 0;

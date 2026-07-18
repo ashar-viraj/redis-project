@@ -138,6 +138,6 @@ void RDBParser::parseDatabase(ifstream &in, Store &store) {
         string value = readString(in);
         if(expiry && *expiry <= 0)
             continue;
-        store.set(key, value, expiry);
+        store.setValue(key, value, expiry);
     }
 }

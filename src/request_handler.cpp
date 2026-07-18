@@ -29,12 +29,13 @@ bool shouldWriteAOF(const string &cmd) {
 }
 
 RequestHandler::RequestHandler(Store &s,
+        RESPSerializer &serializer,
         Config &config,
         ReplicationManager &replication,
         AOFManager &aof,
         int fd,
         bool replaying)
-        : store(s), config(config), replication(replication), aof(aof), clientFd(fd), replaying(replaying) { }
+        : store(s), serializer(serializer), config(config), replication(replication), aof(aof), clientFd(fd), replaying(replaying) { }
 
 RESPValue RequestHandler::executeCommand(const string &cmd, const RESPArray &arr) {
     RESPValue res;
@@ -62,6 +63,9 @@ RESPValue RequestHandler::executeCommand(const string &cmd, const RESPArray &arr
     else if(cmd == "WAIT") res = handleWait(arr);
     else if(cmd == "CONFIG") res = handleConfig(arr);
     else if(cmd == "KEYS") res = handleKeys(arr);
+    else if(cmd == "SUBSCRIBE") res = handleSubscribe(arr);
+    else if(cmd == "UNSUBSCRIBE") res = handleUnsubscribe(arr);
+    else if(cmd == "PUBLISH") res = handlePublish(arr);
     else res = {"ERR unkown command", '-'};
 
     if(!replaying){
@@ -86,6 +90,17 @@ RESPValue RequestHandler::handle(const RESPValue &req) {
 
     string cmd = get<string>(arr[0].value);
     toUpper(cmd);
+
+    if(state.subscribedMode) {
+        if(cmd != "SUBSCRIBE" &&
+            cmd != "PING" &&
+            cmd != "QUIT" &&
+            cmd != "UNSUBSCRIBE" &&
+            cmd != "PSUBSCRIBE" &&
+            cmd != "PUNSUBSCRIBE") {
+            return {"ERR Can't execute '" + cmd + "' in subscribed mode", '-'};
+        }
+    }
 
     if(cmd == "MULTI") {
         state.inTransaction = true;
@@ -114,7 +129,16 @@ RESPValue RequestHandler::handle(const RESPValue &req) {
     return executeCommand(cmd, arr);
 }
 
-RESPValue RequestHandler::handlePing(){
+RESPValue RequestHandler::handlePing() {
+    if(state.subscribedMode) {
+        RESPArray res = {
+            {"pong", '$'},
+            {"", '$'}
+        };
+
+        return {res, '*'};
+    }
+
     return {"PONG", '+'};
 }
 
@@ -149,7 +173,7 @@ RESPValue RequestHandler::handleSet(const RESPArray &arr) {
         }
     }
 
-    store.set(key, value, px);
+    store.setValue(key, value, px);
     store.markKeyAsModified(key);
 
     return {"OK", '+'};
@@ -702,4 +726,64 @@ RESPValue RequestHandler::handleKeys(const RESPArray &arr) {
     for(auto &key : keys)
         res.push_back({key, '$'});
     return {res, '*'};
+}
+
+RESPValue RequestHandler::handleSubscribe(const RESPArray &arr) {
+    if(arr.size() != 2)
+        return {"ERR wrong number of arguments.", '-'};
+
+    string channel = get<string>(arr[1].value);
+    int count = store.subscribe(clientFd, channel);
+    state.subscribedMode = true;
+
+    RESPArray res = {
+        {"subscribe", '$'},
+        {channel, '$'},
+        {count, ':'}
+    };
+
+    return {res, '*'};
+}
+
+RESPValue RequestHandler::handleUnsubscribe(const RESPArray &arr) {
+    if(arr.size() != 2)
+        return {"ERR wrong number of arguments.", '-'};
+
+    const string channel = get<string>(arr[1].value);
+
+    long long count = store.unsubscribe(clientFd, channel);
+
+    if(count == 0)
+        state.subscribedMode = false;
+
+    RESPArray res = {
+        {"unsubscribe", '$'},
+        {channel, '$'},
+        {count, ':'}
+    };
+
+    return {res, '*'};
+}
+
+RESPValue RequestHandler::handlePublish(const RESPArray &arr) {
+    if(arr.size() != 3)
+        return {"ERR wrong number of arguments.", '-'};
+
+    const string channel = get<string>(arr[1].value);
+    const string message = get<string>(arr[2].value);
+
+    vector<int> subscribers = store.getSubscribers(channel);
+    RESPArray res = {
+        {"message", '$'},
+        {channel, '$'},
+        {message, '$'}
+    };
+
+    RESPSerializer serializer;
+    const string msg = serializer.serialize({res, '*'});
+
+    for(auto &sub : subscribers)
+        send_msg(msg, sub);
+
+    return {(long long)subscribers.size(), ':'};
 }
