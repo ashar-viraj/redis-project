@@ -23,9 +23,15 @@ struct StreamEntry {
     vector<pair<string, string>> fields;
 };
 
+struct SortedSetEntry {
+    string member;
+    double score;
+};
+
 using ListType = deque<string>;
 using StreamType = vector<StreamEntry>;
-using RedisData = variant<string, ListType, StreamType>;
+using SortedSetType = vector<SortedSetEntry>;
+using RedisData = variant<string, ListType, StreamType, SortedSetType>;
 
 StreamID parseStreamID(const string &id);
 bool operator<(const StreamID &a, const StreamID &b);
@@ -37,6 +43,7 @@ string streamIDToString(StreamID id);
 bool isPartialId(const string &id);
 StreamID generatePartialID(const StreamType &stream, long long ms);
 StreamID generateAutoID(const StreamType &stream);
+bool operator<(const SortedSetEntry &a, const SortedSetEntry &b);
 struct ValueEntry{
     RedisData value;
     optional<chrono::steady_clock::time_point> expiry;
@@ -91,4 +98,11 @@ public:
     long long subscribe(int clinetFd, const string &channel);
     long long unsubscribe(int clientFd, const string &channel);
     vector<int> getSubscribers(const string &channel);
+
+    long long zadd(const string &key, double score, const string &member);
+    optional<long long> zrank(const string &key, const string &member);
+    optional<vector<string>> zrange(const string &key, int start, int end);
+    long long zcard(const string &key);
+    optional<string> zscore(const string &key, const string &member);
+    long long zrem(const string &key, const string &member);
 };

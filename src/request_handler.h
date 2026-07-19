@@ -67,4 +67,11 @@ private:
     RESPValue handleSubscribe(const RESPArray &arr);
     RESPValue handleUnsubscribe(const RESPArray &arr);
     RESPValue handlePublish(const RESPArray &arr);
+
+    RESPValue handleZadd(const RESPArray &arr);
+    RESPValue handleZrank(const RESPArray &arr);
+    RESPValue handleZrange(const RESPArray &arr);
+    RESPValue handleZcard(const RESPArray &arr);
+    RESPValue handleZscore(const RESPArray &arr);
+    RESPValue handleZrem(const RESPArray &arr);
 };

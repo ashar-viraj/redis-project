@@ -128,7 +128,6 @@ StreamID generateAutoID(const StreamType &stream){
 
 Store::Iterator Store::findValidKey(const string& key) {
     auto itr = kv.find(key);
-
     if (itr == kv.end()) {
         return itr;
     }
@@ -139,6 +138,13 @@ Store::Iterator Store::findValidKey(const string& key) {
     }
 
     return itr;
+}
+
+bool operator<(const SortedSetEntry &a, const SortedSetEntry &b) {
+    if(a.score != b.score)
+        return a.score < b.score;
+
+    return a.member < b.member;
 }
 
 // Implementations
@@ -160,7 +166,6 @@ optional<string> Store::get(const string &key) {
     lock_guard lock(storeMutex);
 
     auto itr = findValidKey(key);
-
     if (itr == kv.end())
         return nullopt;
 
@@ -174,7 +179,6 @@ long long Store::rpush(const string &key, const string &value) {
     lock_guard lock(storeMutex);
 
     auto itr = findValidKey(key);
-
     if(itr == kv.end()) {
         ValueEntry entry;
         entry.value = ListType{};
@@ -252,9 +256,7 @@ optional<vector<string>> Store::lrange(const string &key, int left, int right) {
 
     ListType *list = get_if<ListType>(&(itr->second.value));
     if(!list)
-        throw runtime_error(
-            "WRONGTYPE Operation against a key holding the wrong kind of value"
-        );
+        throw runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
 
     int size = (int)list->size();
 
@@ -368,6 +370,9 @@ string Store::type(const string &key) {
 
     if(get_if<StreamType>(&itr->second.value))
         return "stream";
+
+    if(get_if<SortedSetType>(&itr->second.value))
+        return "zset";
 
     return "none";
 }
@@ -706,4 +711,172 @@ vector<int> Store::getSubscribers(const string &channel) {
         subscribers.push_back(sub);
 
     return subscribers;
+}
+
+long long Store::zadd(const string &key, double score, const string &member) {
+    lock_guard lock(storeMutex);
+
+    auto itr = findValidKey(key);
+
+    if(itr == kv.end()) {
+        ValueEntry entry;
+        entry.value = SortedSetType();
+        kv[key] = move(entry);
+        itr = kv.find(key);
+    }
+
+    auto *zset = get_if<SortedSetType>(&itr->second.value);
+
+    if(!zset)
+        return -1;
+
+    auto itrMember = find_if(zset->begin(),
+                            zset->end(),
+                            [&](const SortedSetEntry &entry) {
+                                return entry.member == member;
+                            }
+                        );
+
+    if(itrMember != zset->end()) {
+        SortedSetEntry updated = *itrMember;
+        zset->erase(itrMember);
+
+        updated.score = score;
+        auto pos = lower_bound(zset->begin(), zset->end(), updated);
+
+        zset->insert(pos, updated);
+
+        return 0;
+    }
+
+    SortedSetEntry entry{member, score};
+
+    auto pos = lower_bound(zset->begin(), zset->end(), entry);
+
+    zset->insert(pos, entry);
+
+    return 1;
+}
+
+optional<long long> Store::zrank(const string &key, const string &member) {
+    lock_guard lock(storeMutex);
+
+    auto itr = findValidKey(key);
+
+    if(itr == kv.end())
+        return nullopt;
+
+    auto *zset = get_if<SortedSetType>(&itr->second.value);
+
+    if(!zset)
+        throw runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
+
+    for(int i = 0; i < zset->size(); i++) {
+        if((*zset)[i].member == member) {
+            return i;
+        }
+    }
+
+    return nullopt;
+}
+
+optional<vector<string>> Store::zrange(const string &key, int start, int end) {
+    lock_guard lock(storeMutex);
+
+    auto itr = findValidKey(key);
+
+    if(itr == kv.end())
+        return {};
+
+    auto *zset = get_if<SortedSetType>(&itr->second.value);
+
+    if(!zset)
+        return nullopt;
+
+    vector<string> members;
+
+    int size = (int)zset->size();
+
+    if(start < 0) start = size + start;
+    if(end < 0) end  = size + end;
+
+    cout << "Iterating in " << start << ' ' << end << endl;
+
+    for(int i = max(0, start); i <= min(size - 1, end); i++) {
+        cout << (*zset)[i].member << ' ' << (*zset)[i].score << endl;
+        members.push_back((*zset)[i].member);
+    }
+
+    return members;
+}
+
+long long Store::zcard(const string &key) {
+    lock_guard lock(storeMutex);
+
+    auto itr = findValidKey(key);
+
+    if(itr == kv.end())
+        return 0;
+
+    auto *zset = get_if<SortedSetType>(&itr->second.value);
+
+    if(!zset)
+        return 0;
+
+    return zset->size();
+}
+
+optional<string> Store::zscore(const string &key, const string &member) {
+    lock_guard lock(storeMutex);
+
+    auto itr = findValidKey(key);
+
+    if(itr == kv.end())
+        return nullopt;
+
+    auto *zset = get_if<SortedSetType>(&itr->second.value);
+
+    if(!zset)
+        return nullopt;
+
+    string score;
+    for(auto &elem : *zset)
+        if(elem.member == member)
+            score = to_string(elem.score);
+
+    if(score.size() == 0)
+        return nullopt;
+
+    while(score.back() == '0')
+        score.pop_back();
+
+    return score;
+}
+
+long long Store::zrem(const string &key, const string &member) {
+    lock_guard lock(storeMutex);
+
+    auto itr = findValidKey(key);
+
+    if(itr == kv.end())
+        return 0;
+
+    auto *zset = get_if<SortedSetType>(&itr->second.value);
+
+    if(!zset)
+        return 0;
+
+    auto itrMember = find_if(zset->begin(),
+                            zset->end(),
+                            [&](const SortedSetEntry &entry) {
+                                return entry.member == member;
+                            }
+                        );
+
+    if(itrMember != zset->end()) {
+        zset->erase(itrMember);
+        return 1;
+    }
+
+    return 0;
 }

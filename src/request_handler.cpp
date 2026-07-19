@@ -21,7 +21,8 @@ bool shouldReplicate(const string &cmd) {
             cmd == "BLPOP" ||
             cmd == "LPOP" ||
             cmd == "RPUSH" ||
-            cmd == "LPUSH";
+            cmd == "LPUSH" ||
+            cmd == "ZADD";
 }
 
 bool shouldWriteAOF(const string &cmd) {
@@ -66,6 +67,12 @@ RESPValue RequestHandler::executeCommand(const string &cmd, const RESPArray &arr
     else if(cmd == "SUBSCRIBE") res = handleSubscribe(arr);
     else if(cmd == "UNSUBSCRIBE") res = handleUnsubscribe(arr);
     else if(cmd == "PUBLISH") res = handlePublish(arr);
+    else if(cmd == "ZADD") res = handleZadd(arr);
+    else if(cmd == "ZRANK") res = handleZrank(arr);
+    else if(cmd == "ZRANGE") res = handleZrange(arr);
+    else if(cmd == "ZCARD") res = handleZcard(arr);
+    else if(cmd == "ZSCORE") res = handleZscore(arr);
+    else if(cmd == "ZREM") res = handleZrem(arr);
     else res = {"ERR unkown command", '-'};
 
     if(!replaying){
@@ -786,4 +793,102 @@ RESPValue RequestHandler::handlePublish(const RESPArray &arr) {
         send_msg(msg, sub);
 
     return {(long long)subscribers.size(), ':'};
+}
+
+RESPValue RequestHandler::handleZadd(const RESPArray &arr) {
+    if(arr.size() != 4)
+        return {"ERR wrong number of arguments", '-'};
+
+    const string key = get<string>(arr[1].value);
+    double score;
+
+    try {
+        score = stod(get<string>(arr[2].value));
+    } catch (...) {
+        return {"ERR value is not a valid float", '-'};
+    }
+
+    const string member = get<string>(arr[3].value);
+    long long inserted = store.zadd(key, score, member);
+
+    if(inserted == -1)
+        return {"WRONGTYPE Operation against a key holding the wrong kind of value", '-'};
+
+    store.markKeyAsModified(key);
+
+    return {inserted, ':'};
+}
+
+RESPValue RequestHandler::handleZrank(const RESPArray &arr) {
+    if(arr.size() != 3)
+        return {"ERR wrong number of arguments", '-'};
+
+    const string key = get<string>(arr[1].value);
+    const string member = get<string>(arr[2].value);
+
+    auto rank = store.zrank(key, member);
+
+    if(!rank)
+        return {nullptr, '$'};
+
+
+    return {*rank, ':'};
+}
+
+RESPValue RequestHandler::handleZrange(const RESPArray &arr) {
+    if(arr.size() != 4)
+        return {"ERR wrong number of arguments", '-'};
+
+    const string key = get<string>(arr[1].value);
+    const int start = stoi(get<string>(arr[2].value));
+    const int end = stoi(get<string>(arr[3].value));
+
+    auto members = store.zrange(key, start, end);
+
+    RESPArray res;
+    if(!members)
+        return {res, '*'};
+
+    for(auto &mem : *members)
+        res.push_back({mem, '$'});
+
+    return {res, '*'};
+}
+
+RESPValue RequestHandler::handleZcard(const RESPArray &arr) {
+    if(arr.size() != 2)
+        return {"ERR wrong number of arguments", '-'};
+
+    const string key = get<string>(arr[1].value);
+
+    long long card = store.zcard(key);
+
+    return {card, ':'};
+}
+
+RESPValue RequestHandler::handleZscore(const RESPArray &arr) {
+    if(arr.size() != 3)
+        return {"ERR wrong number of arguments", '-'};
+
+    const string key = get<string>(arr[1].value);
+    const string member = get<string>(arr[2].value);
+
+    auto score = store.zscore(key, member);
+
+    if(!score)
+        return {nullptr, '$'};
+
+    return {*score, '$'};
+}
+
+RESPValue RequestHandler::handleZrem(const RESPArray &arr) {
+    if(arr.size() != 3)
+        return {"ERR wrong number of arguments", '-'};
+
+    const string key = get<string>(arr[1].value);
+    const string member = get<string>(arr[2].value);
+
+    long long res = store.zrem(key, member);
+
+    return {res, ':'};
 }
