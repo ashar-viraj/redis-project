@@ -74,4 +74,9 @@ private:
     RESPValue handleZcard(const RESPArray &arr);
     RESPValue handleZscore(const RESPArray &arr);
     RESPValue handleZrem(const RESPArray &arr);
+
+    RESPValue handleGeoadd(const RESPArray &arr);
+    RESPValue handleGeopos(const RESPArray &arr);
+    RESPValue handleGeodist(const RESPArray &arr);
+    RESPValue handleGeosearch(const RESPArray &arr);
 };

@@ -1,5 +1,6 @@
 #include "request_handler.h"
 #include "store.h"
+#include "./GEO/geo_utils.h"
 #include "network_utils.h"
 #include <stdexcept>
 #include <iostream>
@@ -22,7 +23,8 @@ bool shouldReplicate(const string &cmd) {
             cmd == "LPOP" ||
             cmd == "RPUSH" ||
             cmd == "LPUSH" ||
-            cmd == "ZADD";
+            cmd == "ZADD" ||
+            cmd == "GEOADD";
 }
 
 bool shouldWriteAOF(const string &cmd) {
@@ -73,6 +75,10 @@ RESPValue RequestHandler::executeCommand(const string &cmd, const RESPArray &arr
     else if(cmd == "ZCARD") res = handleZcard(arr);
     else if(cmd == "ZSCORE") res = handleZscore(arr);
     else if(cmd == "ZREM") res = handleZrem(arr);
+    else if(cmd == "GEOADD") res = handleGeoadd(arr);
+    else if(cmd == "GEOPOS") res = handleGeopos(arr);
+    else if(cmd == "GEODIST") res = handleGeodist(arr);
+    else if(cmd == "GEOSEARCH") res = handleGeosearch(arr);
     else res = {"ERR unkown command", '-'};
 
     if(!replaying){
@@ -891,4 +897,138 @@ RESPValue RequestHandler::handleZrem(const RESPArray &arr) {
     long long res = store.zrem(key, member);
 
     return {res, ':'};
+}
+
+RESPValue RequestHandler::handleGeoadd(const RESPArray &arr) {
+    if(arr.size() != 5)
+        return {"ERR wrong number of arguments", '-'};
+
+    double latitude, longitude;
+
+    try {
+        longitude = stod(get<string>(arr[2].value));
+        latitude = stod(get<string>(arr[3].value));
+    } catch (...) {
+        return {"ERR invalid longitude/latitude", '-'};
+    }
+
+    bool invalidLatitude = latitude < -85.05112878 || latitude > 85.05112878;
+    bool invalidLongitude = longitude < -180.0 || longitude > 180.0;
+
+    if(invalidLongitude && invalidLatitude)
+        return {"ERR invalid longitude latitude", '-'};
+
+    if(invalidLongitude)
+        return {"ERR invalid longitude", '-'};
+
+    if(invalidLatitude)
+        return {"ERR invalid latitude", '-'};
+
+    const string key = get<string>(arr[1].value);
+    const string member = get<string>(arr[4].value);
+    uint64_t score = calculateGeoScore(longitude, latitude);
+
+    long long inserted = store.zadd(key, static_cast<double>(score), member);
+
+    if(inserted == -1)
+        return {"WRONGTYPE Operation against a key holding the wrong kind of value", '-'};
+
+    store.markKeyAsModified(key);
+
+    return {inserted, ':'};
+}
+
+RESPValue RequestHandler::handleGeopos(const RESPArray &arr) {
+    if(arr.size() < 3)
+        return {"ERR wrong number of arguments", '-'};
+
+    string key = get<string>(arr[1].value);
+    RESPArray res;
+
+    for(int i = 2; i < arr.size(); i++) {
+        const string member = get<string>(arr[i].value);
+        auto score = store.zscore(key, member);
+
+        if(score){
+            auto [longitude, latitude] = decodeGeoScore(stoull(*score));
+            RESPArray pos = {
+                {to_string(longitude), '$'},
+                {to_string(latitude), '$'}
+            };
+
+            res.push_back({pos, '*'});
+        } else {
+            res.push_back({nullptr, '*'});
+        }
+    }
+
+    return {res, '*'};
+}
+
+RESPValue RequestHandler::handleGeodist(const RESPArray &arr) {
+    if(arr.size() != 4)
+        return {"ERR wrong number of arguments", '-'};
+
+    string key = get<string>(arr[1].value);
+    string member1 = get<string>(arr[2].value);
+    string member2 = get<string>(arr[3].value);
+
+    auto score1 = store.zscore(key, member1);
+    auto score2 = store.zscore(key, member2);
+
+    if(!score1 || !score2)
+        return {nullptr, '$'};
+
+    auto [lon1, lat1] = decodeGeoScore(stoull(*score1));
+    auto [lon2, lat2] = decodeGeoScore(stoull(*score2));
+
+    double distance = getGeoDistance(lon1, lat1, lon2, lat2);
+
+    ostringstream oss;
+
+    oss << fixed << setprecision(4) << distance;
+
+    return {oss.str(), '$'};
+}
+
+RESPValue RequestHandler::handleGeosearch(const RESPArray &arr) {
+    if(arr.size() != 8)
+        return {"ERR wrong number of arguments", '-'};
+
+    string key, unit;
+    double centerLon, centerLat;
+    long long radius;
+    key = get<string>(arr[1].value);
+    unit = get<string>(arr[7].value);
+
+    try {
+        centerLon = stod(get<string>(arr[3].value));
+        centerLat = stod(get<string>(arr[4].value));
+        radius = stoll(get<string>(arr[6].value));
+    } catch (...) {
+        return {"ERR invalid longitude, latitude or radius", '-'};
+    }
+
+    if(unit == "km")
+        radius *= 1000;
+    else if(unit == "mi")
+        radius *= 1609.34;
+    else if(unit == "ft")
+        radius *= 0.3048;
+    else if(unit != "m")
+        return {"ERR invalid unit", '-'};
+
+    auto members = store.getSortedSet(key);
+
+    RESPArray resp;
+
+    for(auto &entry : *members)
+    {
+        auto [lon, lat] = decodeGeoScore((uint64_t)entry.score);
+        double dist = getGeoDistance(centerLon, centerLat, lon, lat);
+        if(dist <= radius)
+            resp.push_back({entry.member, '$'});
+    }
+
+    return {resp, '*'};
 }

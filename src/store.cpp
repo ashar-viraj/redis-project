@@ -850,6 +850,9 @@ optional<string> Store::zscore(const string &key, const string &member) {
     while(score.back() == '0')
         score.pop_back();
 
+    while(score.back() == '.')
+        score.pop_back();
+
     return score;
 }
 
@@ -879,4 +882,20 @@ long long Store::zrem(const string &key, const string &member) {
     }
 
     return 0;
+}
+
+optional<SortedSetType> Store::getSortedSet(const string &key) {
+    lock_guard lock(storeMutex);
+
+    auto itr = findValidKey(key);
+
+    if(itr == kv.end())
+        return SortedSetType{};
+
+    auto *zset = get_if<SortedSetType>(&itr->second.value);
+
+    if(!zset)
+        return nullopt;
+
+    return *zset;
 }

@@ -105,4 +105,5 @@ public:
     long long zcard(const string &key);
     optional<string> zscore(const string &key, const string &member);
     long long zrem(const string &key, const string &member);
+    optional<SortedSetType> getSortedSet(const string &key);
 };
