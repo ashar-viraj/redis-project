@@ -12,6 +12,7 @@ struct ClientState {
     vector<RESPArray> queuedCommands;
     unordered_map<string, uint64_t> watchedKeys;
     bool subscribedMode = false;
+    bool authenticated;
 };
 
 void toUpper(string &s);
@@ -79,4 +80,7 @@ private:
     RESPValue handleGeopos(const RESPArray &arr);
     RESPValue handleGeodist(const RESPArray &arr);
     RESPValue handleGeosearch(const RESPArray &arr);
+
+    RESPValue handleAcl(const RESPArray &arr);
+    RESPValue handleAuth(const RESPArray &arr);
 };

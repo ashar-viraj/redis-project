@@ -1,6 +1,7 @@
 #include "request_handler.h"
 #include "store.h"
 #include "./GEO/geo_utils.h"
+#include "./SHA/sha256.h"
 #include "network_utils.h"
 #include <stdexcept>
 #include <iostream>
@@ -38,7 +39,14 @@ RequestHandler::RequestHandler(Store &s,
         AOFManager &aof,
         int fd,
         bool replaying)
-        : store(s), serializer(serializer), config(config), replication(replication), aof(aof), clientFd(fd), replaying(replaying) { }
+        : store(s),
+        serializer(serializer),
+        config(config),
+        replication(replication),
+        aof(aof), clientFd(fd),
+        replaying(replaying) {
+            state.authenticated = config.defaultUser.nopass;
+}
 
 RESPValue RequestHandler::executeCommand(const string &cmd, const RESPArray &arr) {
     RESPValue res;
@@ -79,6 +87,8 @@ RESPValue RequestHandler::executeCommand(const string &cmd, const RESPArray &arr
     else if(cmd == "GEOPOS") res = handleGeopos(arr);
     else if(cmd == "GEODIST") res = handleGeodist(arr);
     else if(cmd == "GEOSEARCH") res = handleGeosearch(arr);
+    else if(cmd == "ACL") res = handleAcl(arr);
+    else if(cmd == "AUTH") res = handleAuth(arr);
     else res = {"ERR unkown command", '-'};
 
     if(!replaying){
@@ -103,6 +113,9 @@ RESPValue RequestHandler::handle(const RESPValue &req) {
 
     string cmd = get<string>(arr[0].value);
     toUpper(cmd);
+
+    if(!state.authenticated && cmd != "AUTH")
+        return {"NOAUTH Authentication required.", '-'};
 
     if(state.subscribedMode) {
         if(cmd != "SUBSCRIBE" &&
@@ -1031,4 +1044,82 @@ RESPValue RequestHandler::handleGeosearch(const RESPArray &arr) {
     }
 
     return {resp, '*'};
+}
+
+RESPValue RequestHandler::handleAcl(const RESPArray &arr) {
+    if(arr.size() < 2)
+        return {"ERR wrong number of arguments", '-'};
+
+    string sub = get<string>(arr[1].value);
+    toUpper(sub);
+
+    if(sub == "WHOAMI" && arr.size() == 2)
+        return {"default", '$'};
+    if(sub == "GETUSER" && arr.size() == 3) {
+        string username = get<string>(arr[2].value);
+        if(username != "default")
+            return {"ERR no such user", '-'};
+
+        RESPArray flags, passwords;
+
+        if(config.defaultUser.nopass)
+            flags.push_back({"nopass", '$'});
+
+        for(const auto &hash : config.defaultUser.passwordHashes)
+            passwords.push_back({hash, '$'});
+
+        RESPArray result = {
+            {"flags", '$'},
+            {flags, '*'},
+            {"passwords", '$'},
+            {passwords, '*'}
+        };
+
+        return {result, '*'};
+    }
+
+    if(sub == "SETUSER" && arr.size() == 4) {
+        const string username = get<string>(arr[2].value);
+
+        if(username != "default")
+            return {"ERR no such user", '-'};
+
+        string rule = get<string>(arr[3].value);
+
+        if(rule.empty() || rule[0] != '>')
+            return {"ERR unsupported ACL rule", '-'};
+
+        const string password = rule.substr(1);
+
+        const string hash = sha256(password);
+        config.defaultUser.nopass = false;
+
+        // config.defaultUser.passwordHashes.clear();
+        config.defaultUser.passwordHashes.push_back(hash);
+
+        return {"OK", '+'};
+    }
+
+    return {"ERR unknown ACL subcommand", '-'};
+}
+
+RESPValue RequestHandler::handleAuth(const RESPArray &arr) {
+    if(arr.size() != 3)
+        return {"ERR wrong number of arguments", '-'};
+
+    string username = get<string>(arr[1].value);
+    string password = get<string>(arr[2].value);
+
+    if(username != "default")
+        return {"WRONGPASS invalid username-password pair or user is disabled.", '-'};
+
+    const string hash = sha256(password);
+    for(auto &storedHash : config.defaultUser.passwordHashes) {
+        if(storedHash == hash) {
+            state.authenticated = true;
+            return {"OK", '+'};
+        }
+    }
+
+    return {"WRONGPASS invalid username-password pair or user is disabled.", '-'};
 }

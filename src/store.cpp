@@ -800,12 +800,8 @@ optional<vector<string>> Store::zrange(const string &key, int start, int end) {
     if(start < 0) start = size + start;
     if(end < 0) end  = size + end;
 
-    cout << "Iterating in " << start << ' ' << end << endl;
-
-    for(int i = max(0, start); i <= min(size - 1, end); i++) {
-        cout << (*zset)[i].member << ' ' << (*zset)[i].score << endl;
+    for(int i = max(0, start); i <= min(size - 1, end); i++)
         members.push_back((*zset)[i].member);
-    }
 
     return members;
 }
