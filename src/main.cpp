@@ -17,6 +17,7 @@
 #include "./AOF/aof_manager.h"
 #include "config.h"
 #include "empty_rdb.h"
+#include "event_loop.h"
 #include "network_utils.h"
 #include "replication_manager.h"
 #include "request_handler.h"
@@ -489,19 +490,15 @@ int main(int argc, char **argv)
 
   // Uncomment the code below to pass the first stage
 
-  while (true)
-  {
-    int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, (socklen_t *)&client_addr_len);
-    if (client_fd < 0)
-    {
-      cout << "Client connection failed.\n";
-      continue;
-    }
-    // std::cout << "Client connected\n";
-    thread(handleClient, client_fd, ref(parser), ref(store), ref(serializer), ref(replication), ref(aof), ref(config)).detach();
-
-    // handleClient(client_fd);
+  try {
+    EventLoop loop(server_fd, store, serializer, replication, aof, config);
+    loop.run();
+  } catch(const exception &e) {
+    cerr << "Event loop failed: " << e.what() << "\n";
+    close(server_fd);
+    return 1;
   }
+
   close(server_fd);
 
   return 0;

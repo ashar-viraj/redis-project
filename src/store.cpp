@@ -150,8 +150,6 @@ bool operator<(const SortedSetEntry &a, const SortedSetEntry &b) {
 // Implementations
 
 void Store::setValue(const string &key, const string &value, optional<long long> px) {
-    lock_guard lock(storeMutex);
-
     ValueEntry entry;
 
     entry.value = value;
@@ -163,8 +161,6 @@ void Store::setValue(const string &key, const string &value, optional<long long>
 }
 
 optional<string> Store::get(const string &key) {
-    lock_guard lock(storeMutex);
-
     auto itr = findValidKey(key);
     if (itr == kv.end())
         return nullopt;
@@ -176,8 +172,6 @@ optional<string> Store::get(const string &key) {
 }
 
 long long Store::rpush(const string &key, const string &value) {
-    lock_guard lock(storeMutex);
-
     auto itr = findValidKey(key);
     if(itr == kv.end()) {
         ValueEntry entry;
@@ -210,8 +204,6 @@ long long Store::rpush(const string &key, const string &value) {
 }
 
 long long Store::lpush(const string &key, const string &value) {
-    lock_guard lock(storeMutex);
-
     auto itr = findValidKey(key);
 
     if(itr == kv.end()) {
@@ -245,8 +237,6 @@ long long Store::lpush(const string &key, const string &value) {
 }
 
 optional<vector<string>> Store::lrange(const string &key, int left, int right) {
-    lock_guard lock(storeMutex);
-
     auto itr = kv.find(key);
 
     optional<vector<string>> values = vector<string>{};
@@ -270,8 +260,6 @@ optional<vector<string>> Store::lrange(const string &key, int left, int right) {
 }
 
 long long Store::llen(const string &key) {
-    lock_guard lock(storeMutex);
-
     auto itr = kv.find(key);
 
     if(itr == kv.end())
@@ -286,8 +274,6 @@ long long Store::llen(const string &key) {
 }
 
 optional<string> Store::lpop(const string &key) {
-    lock_guard lock(storeMutex);
-
     auto itr = kv.find(key);
 
     if(itr == kv.end())
@@ -308,29 +294,26 @@ optional<string> Store::lpop(const string &key) {
 optional<pair<string, string>> Store::blpop(const string &key, double timeoutSeconds) {
     shared_ptr<WaitingClient> waiter;
 
-    {
-        lock_guard lock(storeMutex);
-        auto itr = kv.find(key);
+    auto itr = kv.find(key);
 
-        if(itr != kv.end()) {
-            auto *list = get_if<ListType>(&itr->second.value);
+    if(itr != kv.end()) {
+        auto *list = get_if<ListType>(&itr->second.value);
 
-            if(!list)
-                throw runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
+        if(!list)
+            throw runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
 
-            if(!list->empty()) {
-                string val = list->front();
+        if(!list->empty()) {
+            string val = list->front();
 
-                list->pop_front();
+            list->pop_front();
 
-                markKeyAsModified(key);
-                return {{key, val}};
-            }
+            markKeyAsModified(key);
+            return {{key, val}};
         }
-
-        waiter = make_shared<WaitingClient>();
-        waiting[key].push(waiter);
     }
+
+    waiter = make_shared<WaitingClient>();
+    waiting[key].push(waiter);
 
     unique_lock lock(waiter->mtx);
 
@@ -355,8 +338,6 @@ optional<pair<string, string>> Store::blpop(const string &key, double timeoutSec
 }
 
 string Store::type(const string &key) {
-    lock_guard lock(storeMutex);
-
     auto itr = findValidKey(key);
 
     if (itr == kv.end())
@@ -378,8 +359,6 @@ string Store::type(const string &key) {
 }
 
 string Store::xadd(const string &streamKey, const string &entryId, const vector<pair<string, string>> &fields) {
-    lock_guard lock(storeMutex);
-
     if(isInvalidEntryId(entryId))
         throw runtime_error("ERR wrong type of argument in id. Should be of format <num>-<num>, *, <num>-*.");
 
@@ -442,8 +421,6 @@ string Store::xadd(const string &streamKey, const string &entryId, const vector<
 }
 
 optional<StreamType> Store::xrange(const string &key, const string &startStr, const string &endStr) {
-    lock_guard lock(storeMutex);
-
     auto itr = kv.find(key);
 
     if(itr == kv.end())
@@ -473,8 +450,6 @@ optional<StreamType> Store::xrange(const string &key, const string &startStr, co
 }
 
 optional<StreamType> Store::xread(const string &key, const string &idStr) {
-    lock_guard lock(storeMutex);
-
     auto itr = kv.find(key);
 
     if(itr == kv.end())
@@ -532,8 +507,6 @@ optional<vector<pair<string, StreamType>>> Store::xreadBlocking(const vector<pai
     };
 
     {
-        lock_guard lock(storeMutex);
-
         for(const auto &[key, idStr] : streams) {
             if(idStr != "$") {
                 resolvedStreams.push_back({key, idStr});
@@ -585,8 +558,6 @@ optional<vector<pair<string, StreamType>>> Store::xreadBlocking(const vector<pai
 
     lock.unlock();
 
-    lock_guard storeLock(storeMutex);
-
     for(const auto &[key, _] : resolvedStreams) {
         auto waitersItr = streamWaiting.find(key);
         if(waitersItr == streamWaiting.end())
@@ -624,8 +595,6 @@ uint64_t Store::getKeyVersion(const string &key) {
 }
 
 optional<long long> Store::incr(const string &key) {
-    lock_guard lock(storeMutex);
-
     auto itr = findValidKey(key);
 
     if(itr == kv.end()) {
@@ -664,7 +633,6 @@ optional<long long> Store::incr(const string &key) {
 }
 
 vector<string> Store::getkeys() {
-    lock_guard lock(storeMutex);
     vector<string> keys;
     for(auto &[key, _] : kv)
         keys.push_back(key);
@@ -672,8 +640,6 @@ vector<string> Store::getkeys() {
 }
 
 long long Store::subscribe(int clientFd, const string &channel) {
-    lock_guard lock(storeMutex);
-
     channelSubscribers[channel].insert(clientFd);
     clientSubscriptions[clientFd].insert(channel);
 
@@ -681,8 +647,6 @@ long long Store::subscribe(int clientFd, const string &channel) {
 }
 
 long long Store::unsubscribe(int clientFd, const string &channel) {
-    lock_guard lock(storeMutex);
-
     channelSubscribers[channel].erase(clientFd);
     clientSubscriptions[clientFd].erase(channel);
 
@@ -698,8 +662,6 @@ long long Store::unsubscribe(int clientFd, const string &channel) {
 }
 
 vector<int> Store::getSubscribers(const string &channel) {
-    lock_guard lock(storeMutex);
-
     vector<int> subscribers;
     auto itr = channelSubscribers.find(channel);
 
@@ -714,8 +676,6 @@ vector<int> Store::getSubscribers(const string &channel) {
 }
 
 long long Store::zadd(const string &key, double score, const string &member) {
-    lock_guard lock(storeMutex);
-
     auto itr = findValidKey(key);
 
     if(itr == kv.end()) {
@@ -759,8 +719,6 @@ long long Store::zadd(const string &key, double score, const string &member) {
 }
 
 optional<long long> Store::zrank(const string &key, const string &member) {
-    lock_guard lock(storeMutex);
-
     auto itr = findValidKey(key);
 
     if(itr == kv.end())
@@ -781,8 +739,6 @@ optional<long long> Store::zrank(const string &key, const string &member) {
 }
 
 optional<vector<string>> Store::zrange(const string &key, int start, int end) {
-    lock_guard lock(storeMutex);
-
     auto itr = findValidKey(key);
 
     if(itr == kv.end())
@@ -807,8 +763,6 @@ optional<vector<string>> Store::zrange(const string &key, int start, int end) {
 }
 
 long long Store::zcard(const string &key) {
-    lock_guard lock(storeMutex);
-
     auto itr = findValidKey(key);
 
     if(itr == kv.end())
@@ -823,8 +777,6 @@ long long Store::zcard(const string &key) {
 }
 
 optional<string> Store::zscore(const string &key, const string &member) {
-    lock_guard lock(storeMutex);
-
     auto itr = findValidKey(key);
 
     if(itr == kv.end())
@@ -853,8 +805,6 @@ optional<string> Store::zscore(const string &key, const string &member) {
 }
 
 long long Store::zrem(const string &key, const string &member) {
-    lock_guard lock(storeMutex);
-
     auto itr = findValidKey(key);
 
     if(itr == kv.end())
@@ -881,8 +831,6 @@ long long Store::zrem(const string &key, const string &member) {
 }
 
 optional<SortedSetType> Store::getSortedSet(const string &key) {
-    lock_guard lock(storeMutex);
-
     auto itr = findValidKey(key);
 
     if(itr == kv.end())

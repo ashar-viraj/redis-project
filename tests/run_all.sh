@@ -47,6 +47,12 @@ run_stage "$TESTS_DIR/test_xread_blocking.sh"     "Stage 24/25/26: XREAD blockin
 run_stage "$TESTS_DIR/test_watch.sh"              "Stage 27: WATCH/UNWATCH"
 run_stage "$TESTS_DIR/test_transactions.sh"       "Stage 28: Transactions (MULTI/EXEC)"
 run_stage "$TESTS_DIR/test_replication.sh"        "Stage 29: Replication"
+run_stage "$TESTS_DIR/test_rdb_persistence.sh"    "Stage 30: RDB Persistence"
+run_stage "$TESTS_DIR/test_aof_persistence.sh"    "Stage 31: AOF Persistence"
+run_stage "$TESTS_DIR/test_pubsub.sh"             "Stage 32: Pub/Sub"
+run_stage "$TESTS_DIR/test_sorted_sets.sh"        "Stage 33: Sorted Sets"
+run_stage "$TESTS_DIR/test_geo.sh"                "Stage 34: Geospatial Commands"
+run_stage "$TESTS_DIR/test_acl_auth.sh"           "Stage 35: ACL Authentication"
 
 echo "=============================="
 echo "Results: $PASS passed, $FAIL failed"

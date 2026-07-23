@@ -69,7 +69,6 @@ private:
     map<string, ValueEntry> kv;
     map<string, queue<shared_ptr<WaitingClient>>> waiting;
     map<string, deque<shared_ptr<StreamWaitingClient>>> streamWaiting;
-    mutex storeMutex;
     map<string, uint64_t> keyVersion;
     map<string, set<int>> channelSubscribers;
     map<int, set<string>> clientSubscriptions;
