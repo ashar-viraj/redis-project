@@ -1045,3 +1045,7 @@ dkms.conf
 *.dis
 
 vcpkg_installed
+
+# Benchmark artifacts
+build-bench/
+tests/bench_results/

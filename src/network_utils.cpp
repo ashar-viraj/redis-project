@@ -1,33 +1,27 @@
 #include "network_utils.h"
 #include <cerrno>
 #include <iostream>
-#include <mutex>
 #include <sys/socket.h>
 #include <csignal>
-#include <utility>
 
 namespace {
-mutex interceptorMutex;
-SendInterceptor sendInterceptor;
+SendSink sendSink;
 }
 
-void set_send_interceptor(SendInterceptor interceptor)
+void set_send_sink(SendSink sink)
 {
-    lock_guard<mutex> lock(interceptorMutex);
-    sendInterceptor = move(interceptor);
+    sendSink = move(sink);
 }
 
 void send_msg(const string &message, int clientFd)
 {
-    SendInterceptor interceptor;
-    {
-        lock_guard<mutex> lock(interceptorMutex);
-        interceptor = sendInterceptor;
+    if(sendSink) {
+        sendSink(clientFd, message);
+        return;
     }
 
-    if(interceptor && interceptor(clientFd, message))
-        return;
-
+    // Fallback raw blocking send, only reachable before EventLoop installs a
+    // sink (i.e. during the synchronous master-handshake at startup).
     size_t total_sent = 0;
     while (total_sent < message.size())
     {

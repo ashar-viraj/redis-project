@@ -3,6 +3,7 @@
 #include <vector>
 #include <stdexcept>
 #include <iostream>
+#include <climits>
 
 // Helper functions
 StreamID parseStreamID(const string &id) {
@@ -184,21 +185,6 @@ long long Store::rpush(const string &key, const string &value) {
     if(!list)
         return -1;
 
-    while(!waiting[key].empty()) {
-        auto waiter = waiting[key].front();
-        waiting[key].pop();
-        {
-            lock_guard g(waiter->mtx);
-            if(waiter->completed)
-                continue;
-            waiter->completed = true;
-            waiter->poppedValue = value;
-        }
-
-        waiter->cv.notify_one();
-        return 1;
-    }
-
     list->push_back(value);
     return list->size();
 }
@@ -216,21 +202,6 @@ long long Store::lpush(const string &key, const string &value) {
     auto *list = get_if<ListType>(&(itr->second.value));
     if(!list)
         return -1;
-
-    while(!waiting[key].empty()) {
-        auto waiter = waiting[key].front();
-        waiting[key].pop();
-        {
-            lock_guard g(waiter->mtx);
-            if(waiter->completed)
-                continue;
-            waiter->completed = true;
-            waiter->poppedValue = value;
-        }
-
-        waiter->cv.notify_one();
-        return 1;
-    }
 
     list->push_front(value);
     return list->size();
@@ -291,50 +262,25 @@ optional<string> Store::lpop(const string &key) {
     return front;
 }
 
-optional<pair<string, string>> Store::blpop(const string &key, double timeoutSeconds) {
-    shared_ptr<WaitingClient> waiter;
-
+optional<string> Store::tryLpop(const string &key) {
     auto itr = kv.find(key);
 
-    if(itr != kv.end()) {
-        auto *list = get_if<ListType>(&itr->second.value);
+    if(itr == kv.end())
+        return nullopt;
 
-        if(!list)
-            throw runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
+    auto *list = get_if<ListType>(&itr->second.value);
 
-        if(!list->empty()) {
-            string val = list->front();
+    if(!list)
+        throw runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
 
-            list->pop_front();
+    if(list->empty())
+        return nullopt;
 
-            markKeyAsModified(key);
-            return {{key, val}};
-        }
-    }
+    string val = list->front();
+    list->pop_front();
 
-    waiter = make_shared<WaitingClient>();
-    waiting[key].push(waiter);
-
-    unique_lock lock(waiter->mtx);
-
-    if(timeoutSeconds == 0) {
-        waiter->cv.wait(lock, [&] {
-            return waiter->poppedValue.has_value();
-        });
-    } else {
-        auto timeout = chrono::milliseconds(static_cast<long long>(timeoutSeconds * 1000));
-        waiter->cv.wait_for(lock, timeout, [&] {
-            return waiter->completed;
-        });
-    }
-
-    if(waiter->poppedValue.has_value()) {
-        markKeyAsModified(key);
-        return {{key, *waiter->poppedValue}};
-    }
-
-    waiter->completed = true;
-    return nullopt;
+    markKeyAsModified(key);
+    return val;
 }
 
 string Store::type(const string &key) {
@@ -400,23 +346,6 @@ string Store::xadd(const string &streamKey, const string &entryId, const vector<
     markKeyAsModified(streamKey);
     stream->push_back({newId, fields});
 
-    while(!streamWaiting[streamKey].empty()) {
-        auto waiter = streamWaiting[streamKey].front();
-        streamWaiting[streamKey].pop_front();
-
-        {
-            lock_guard g(waiter->mtx);
-            if(waiter->completed)
-                continue;
-            waiter->completed = true;
-        }
-
-        waiter->cv.notify_one();
-    }
-
-    if(streamWaiting[streamKey].empty())
-        streamWaiting.erase(streamKey);
-
     return streamIDToString(newId);
 }
 
@@ -472,118 +401,67 @@ optional<StreamType> Store::xread(const string &key, const string &idStr) {
     return result;
 }
 
-optional<vector<pair<string, StreamType>>> Store::xreadBlocking(const vector<pair<string, string>> &streams, long long timeoutMs) {
-    shared_ptr<StreamWaitingClient> waiter;
+vector<pair<string, string>> Store::resolveStreamIds(const vector<pair<string, string>> &streams) {
     vector<pair<string, string>> resolvedStreams;
 
-    auto collectAvailable = [&]() {
-        vector<pair<string, StreamType>> response;
-
-        for(const auto &[key, idStr] : resolvedStreams) {
-            auto itr = kv.find(key);
-
-            if(itr == kv.end())
-                continue;
-
-            auto *stream = get_if<StreamType>(&itr->second.value);
-
-            if(!stream)
-                throw runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
-
-            StreamID id = parseRangeID(idStr, false);
-
-            auto startItr = upper_bound(stream->begin(), stream->end(), id,
-            [](const StreamID &id, const StreamEntry &entry){
-                return id < entry.id;
-            });
-
-            StreamType result(startItr, stream->end());
-
-            if(!result.empty())
-                response.push_back({key, result});
+    for(const auto &[key, idStr] : streams) {
+        if(idStr != "$") {
+            resolvedStreams.push_back({key, idStr});
+            continue;
         }
 
-        return response;
-    };
+        auto itr = kv.find(key);
 
-    {
-        for(const auto &[key, idStr] : streams) {
-            if(idStr != "$") {
-                resolvedStreams.push_back({key, idStr});
-                continue;
-            }
-
-            auto itr = kv.find(key);
-
-            if(itr == kv.end()) {
-                resolvedStreams.push_back({key, "0-0"});
-                continue;
-            }
-
-            auto *stream = get_if<StreamType>(&itr->second.value);
-
-            if(!stream)
-                throw runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
-
-            if(stream->empty())
-                resolvedStreams.push_back({key, "0-0"});
-            else
-                resolvedStreams.push_back({key, streamIDToString(stream->back().id)});
+        if(itr == kv.end()) {
+            resolvedStreams.push_back({key, "0-0"});
+            continue;
         }
 
-        vector<pair<string, StreamType>> available = collectAvailable();
-        if(!available.empty())
-            return available;
+        auto *stream = get_if<StreamType>(&itr->second.value);
 
-        waiter = make_shared<StreamWaitingClient>();
+        if(!stream)
+            throw runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
 
-        for(const auto &[key, _] : resolvedStreams)
-            streamWaiting[key].push_back(waiter);
+        if(stream->empty())
+            resolvedStreams.push_back({key, "0-0"});
+        else
+            resolvedStreams.push_back({key, streamIDToString(stream->back().id)});
     }
 
-    unique_lock lock(waiter->mtx);
+    return resolvedStreams;
+}
 
-    if(timeoutMs == 0) {
-        waiter->cv.wait(lock, [&] {
-            return waiter->completed;
-        });
-    } else {
-        waiter->cv.wait_for(lock, chrono::milliseconds(timeoutMs), [&] {
-            return waiter->completed;
-        });
-    }
+optional<vector<pair<string, StreamType>>> Store::tryXread(const vector<pair<string, string>> &resolvedStreams) {
+    vector<pair<string, StreamType>> response;
 
-    bool timedOut = !waiter->completed;
-    waiter->completed = true;
+    for(const auto &[key, idStr] : resolvedStreams) {
+        auto itr = kv.find(key);
 
-    lock.unlock();
-
-    for(const auto &[key, _] : resolvedStreams) {
-        auto waitersItr = streamWaiting.find(key);
-        if(waitersItr == streamWaiting.end())
+        if(itr == kv.end())
             continue;
 
-        auto &waiters = waitersItr->second;
-        for(auto itr = waiters.begin(); itr != waiters.end();) {
-            if(*itr == waiter)
-                itr = waiters.erase(itr);
-            else
-                itr++;
-        }
+        auto *stream = get_if<StreamType>(&itr->second.value);
 
-        if(waiters.empty())
-            streamWaiting.erase(waitersItr);
+        if(!stream)
+            throw runtime_error("WRONGTYPE Operation against a key holding the wrong kind of value");
+
+        StreamID id = parseRangeID(idStr, false);
+
+        auto startItr = upper_bound(stream->begin(), stream->end(), id,
+        [](const StreamID &id, const StreamEntry &entry){
+            return id < entry.id;
+        });
+
+        StreamType result(startItr, stream->end());
+
+        if(!result.empty())
+            response.push_back({key, result});
     }
 
-    if(timedOut)
+    if(response.empty())
         return nullopt;
 
-    vector<pair<string, StreamType>> available = collectAvailable();
-
-    if(available.empty())
-        return nullopt;
-
-    return available;
+    return response;
 }
 
 void Store::markKeyAsModified(const string &key) {
@@ -788,9 +666,14 @@ optional<string> Store::zscore(const string &key, const string &member) {
         return nullopt;
 
     string score;
-    for(auto &elem : *zset)
-        if(elem.member == member)
-            score = to_string(elem.score);
+    ostringstream oss;
+
+    for(auto &elem : *zset) {
+        if(elem.member == member) {
+            oss << setprecision(17) << elem.score;
+            score = oss.str();
+        }
+    }
 
     if(score.size() == 0)
         return nullopt;

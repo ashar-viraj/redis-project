@@ -14,13 +14,16 @@ void toUpper(string &s) {
 }
 
 bool shouldReplicate(const string &cmd) {
+    // BLPOP replicates explicitly (see finalizeBlpop) only when it actually
+    // pops a value, whether that happens immediately or after being parked
+    // by EventLoop -- it is deliberately excluded here to avoid propagating
+    // it a second time (or propagating it when it resolved to nil).
     return cmd == "SET" ||
             cmd == "" ||
             cmd == "UNWATCH" ||
             cmd == "WATCH" ||
             cmd == "INCR" ||
             cmd == "XADD" ||
-            cmd == "BLPOP" ||
             cmd == "LPOP" ||
             cmd == "RPUSH" ||
             cmd == "LPUSH" ||
@@ -336,20 +339,46 @@ RESPValue RequestHandler::handleLpop(const RESPArray &arr) {
 }
 
 RESPValue RequestHandler::handleBlpop(const RESPArray &arr) {
+    // Reached only from a non-parking context (e.g. inside MULTI/EXEC).
+    // Real Redis never blocks inside a transaction either -- attempt once
+    // and reply nil if nothing is available yet.
+    string key;
+    double timeoutSeconds;
+
+    auto res = tryBlpop(arr, key, timeoutSeconds);
+    return res.value_or(RESPValue{nullptr, '*'});
+}
+
+optional<RESPValue> RequestHandler::tryBlpop(const RESPArray &arr, string &outKey, double &outTimeoutSeconds) {
     if(arr.size() != 3)
-        return {"ERR wrong number of arguments.", '-'};
+        return RESPValue{"ERR wrong number of arguments.", '-'};
 
-    string key = get<string>(arr[1].value);
-    string timeoutStr = get<string>(arr[2].value);
+    outKey = get<string>(arr[1].value);
 
-    auto res = store.blpop(key, stod(timeoutStr));
+    try {
+        outTimeoutSeconds = stod(get<string>(arr[2].value));
+    } catch(const exception &e) {
+        return RESPValue{e.what(), '-'};
+    }
 
-    if(!res)
-        return {nullptr, '*'};
+    optional<string> val = store.tryLpop(outKey);
+    if(!val)
+        return nullopt;
 
+    return finalizeBlpop(outKey, *val, arr);
+}
+
+RESPValue RequestHandler::finalizeBlpop(const string &key, const string &value, const RESPArray &originalArr) {
     RESPArray out;
-    out.push_back({res->first, '$'});
-    out.push_back({res->second, '$'});
+    out.push_back({key, '$'});
+    out.push_back({value, '$'});
+
+    if(!replaying) {
+        replication.propagate(originalArr);
+
+        if(config.appendOnly)
+            aof.append(originalArr);
+    }
 
     return {out, '*'};
 }
@@ -475,7 +504,11 @@ RESPValue RequestHandler::handleXread(const RESPArray &arr) {
     vector<pair<string, StreamType>> streamResults;
 
     if(blocking) {
-        auto result = store.xreadBlocking(requestedStreams, timeoutMs);
+        // Reached only from a non-parking context (e.g. inside MULTI/EXEC) --
+        // attempt once and reply nil if nothing is available yet, same as
+        // BLPOP's non-parking fallback.
+        auto resolved = store.resolveStreamIds(requestedStreams);
+        auto result = store.tryXread(resolved);
         if(!result)
             return {nullptr, '*'};
 
@@ -491,6 +524,10 @@ RESPValue RequestHandler::handleXread(const RESPArray &arr) {
         }
     }
 
+    return formatXreadResponse(streamResults);
+}
+
+RESPValue RequestHandler::formatXreadResponse(const vector<pair<string, StreamType>> &streamResults) {
     RESPArray response;
 
     for(const auto &[key, entriesResult] : streamResults) {
@@ -528,6 +565,57 @@ RESPValue RequestHandler::handleXread(const RESPArray &arr) {
         return {nullptr, '*'};
 
     return {response, '*'};
+}
+
+optional<RESPValue> RequestHandler::tryXreadBlock(const RESPArray &arr, vector<pair<string, string>> &outResolvedStreams, long long &outTimeoutMs) {
+    if(arr.size() < 6)
+        return RESPValue{"ERR wrong number of arguments.", '-'};
+
+    try {
+        outTimeoutMs = stoll(get<string>(arr[2].value));
+    } catch(...) {
+        return RESPValue{"ERR timeout is not an integer or out of range", '-'};
+    }
+
+    if(outTimeoutMs < 0)
+        return RESPValue{"ERR timeout is negative", '-'};
+
+    string keyword = get<string>(arr[3].value);
+    toUpper(keyword);
+
+    if(keyword != "STREAMS")
+        return RESPValue{"ERR syntax error", '-'};
+
+    int streamArgs = (int)arr.size() - 4;
+    if(streamArgs < 2 || streamArgs % 2 != 0)
+        return RESPValue{"ERR wrong number of arguments.", '-'};
+
+    int streamCount = streamArgs / 2;
+    int keyIdx = 4;
+    int idIdx = keyIdx + streamCount;
+
+    vector<pair<string, string>> requestedStreams;
+    for(int i = 0; i < streamCount; i++) {
+        string key = get<string>(arr[keyIdx + i].value);
+        string id = get<string>(arr[idIdx + i].value);
+        requestedStreams.push_back({key, id});
+    }
+
+    outResolvedStreams = store.resolveStreamIds(requestedStreams);
+
+    auto result = store.tryXread(outResolvedStreams);
+    if(!result)
+        return nullopt;
+
+    return formatXreadResponse(*result);
+}
+
+optional<RESPValue> RequestHandler::resolveXread(const vector<pair<string, string>> &resolvedStreams) {
+    auto result = store.tryXread(resolvedStreams);
+    if(!result)
+        return nullopt;
+
+    return formatXreadResponse(*result);
 }
 
 RESPValue RequestHandler::handleIncr(const RESPArray &arr) {
@@ -674,20 +762,47 @@ RESPValue RequestHandler::handlePsync(const RESPArray &arr) {
 }
 
 RESPValue RequestHandler::handleWait(const RESPArray &arr) {
-    if(arr.size() != 3)
-        return {"ERR wrong number of arguments.", '-'};
+    // Reached only from a non-parking context (e.g. inside MULTI/EXEC) --
+    // real Redis doesn't actually wait for replicas inside a transaction
+    // either, it just reports the current ack count.
+    int numReplicas;
+    long long targetOffset, timeoutMs;
 
-    long long numReplicas, timeoutMs;
+    auto res = tryWait(arr, numReplicas, targetOffset, timeoutMs);
+    if(res)
+        return *res;
+
+    return {(long long)replication.countAcked(targetOffset), ':'};
+}
+
+optional<RESPValue> RequestHandler::tryWait(const RESPArray &arr, int &outNumReplicas, long long &outTargetOffset, long long &outTimeoutMs) {
+    if(arr.size() != 3)
+        return RESPValue{"ERR wrong number of arguments.", '-'};
+
+    long long numReplicas;
     try {
         numReplicas = stoll(get<string>(arr[1].value));
-        timeoutMs = stoll(get<string>(arr[2].value));
+        outTimeoutMs = stoll(get<string>(arr[2].value));
     } catch (...) {
-        return {"ERR value is not an integer or out of range", '-'};
+        return RESPValue{"ERR value is not an integer or out of range", '-'};
+    }
+    outNumReplicas = (int)numReplicas;
+
+    if(!replication.hasPendingWrites()) {
+        outTargetOffset = replication.getMasterOffset();
+        return RESPValue{replication.getReplicaCount(), ':'};
     }
 
-    int acked = replication.waitForAcks((int)numReplicas, timeoutMs);
+    outTargetOffset = replication.requestAcks();
 
-    return {(long long)acked, ':'};
+    if(outTargetOffset == 0)
+        return RESPValue{replication.getReplicaCount(), ':'};
+
+    int acked = replication.countAcked(outTargetOffset);
+    if(acked >= outNumReplicas)
+        return RESPValue{(long long)acked, ':'};
+
+    return nullopt;
 }
 
 RESPValue RequestHandler::handleConfig(const RESPArray &arr) {

@@ -58,7 +58,45 @@ uint64_t RDBParser::readLength(ifstream &in) {
 }
 
 string RDBParser::readString(ifstream &in) {
-    uint64_t length = readLength(in);
+    uint8_t first = readByte(in);
+    uint8_t type = first >> 6;
+
+    if(type == 3) {
+        uint8_t encoding = first & 0x3F;
+
+        switch (encoding) {
+            case 0: { // 8-bit signed integer
+                int8_t value = static_cast<int8_t>(readByte(in));
+                return to_string(value);
+            }
+
+            case 1: { // 16-bit signed integer, little-endian
+                uint16_t raw = readByte(in);
+                raw |= static_cast<uint16_t>(readByte(in)) << 8;
+                return to_string(static_cast<int16_t>(raw));
+            }
+
+            case 2: { // 32-bit signed integer, little-endian
+                uint32_t raw = readUint32LE(in);
+                return to_string(static_cast<int32_t>(raw));
+            }
+
+            default:
+                throw runtime_error("LZF-compressed strings are not supported yet.");
+        }
+    }
+
+    uint64_t length;
+    if(type == 0) {
+        length = first & 0x3F;
+    } else if(type == 1) {
+        uint8_t second = readByte(in);
+        length = ((first & 0x3F) << 8) | second;
+    } else {
+        length = 0;
+        for(int i = 0; i < 4; i++)
+            length = (length << 8) | readByte(in);
+    }
 
     string str(length, '\0');
     in.read(&str[0], length);

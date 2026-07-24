@@ -10,7 +10,6 @@
 #include <string>
 #include <sys/socket.h>
 #include <sys/types.h>
-#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -29,20 +28,6 @@ using namespace std;
 
 #define MAX_BUFFER_LEN 1024
 
-
-string escapeRESP(const string &s) {
-    string out;
-    for (char c : s) {
-        if (c == '\r')
-            out += "\\r";
-        else if (c == '\n')
-            out += "\\n\n";
-        else
-            out += c;
-    }
-    return out;
-}
-
 string receive_msg(int sock_fd) {
   char buffer[1024] = {0};
 
@@ -54,126 +39,6 @@ string receive_msg(int sock_fd) {
   return string(buffer, len);
 }
 
-// Parses and executes as many complete RESP commands as are already sitting
-// in `pending`, WITHOUT touching the socket. Stops as soon as what's left
-// doesn't form a complete command yet (or pending is empty).
-void consumeCommands(int sock_fd,
-                      string &pending,
-                      RESPParser &parser,
-                      RequestHandler &handler,
-                      RESPSerializer &serializer,
-                      Config &config,
-                      ReplicationManager &replication,
-                      bool sendResponse) {
-  while (!pending.empty()) {
-    size_t bytesConsumed = 0;
-    RESPValue req;
-
-    try {
-      req = parser.parse(pending, bytesConsumed);
-    } catch (const exception &e) {
-      string msg = e.what();
-      if (msg == "Incomplete RESP message") {
-        // Not enough bytes buffered yet for a full command. Leave `pending`
-        // untouched and wait for the next recv() to bring the rest.
-        break;
-      }
-
-      // A genuinely malformed command (not just incomplete). Report it and
-      // drop the buffer so we don't spin forever trying to reparse garbage.
-      if (sendResponse)
-        send_msg("-" + msg + "\r\n", sock_fd);
-      else
-        cout << "ERR while replicating : " << msg << endl;
-
-      pending.clear();
-      break;
-    }
-
-    // Successfully parsed one full command -- remove exactly the bytes that
-    // belonged to it and keep whatever (possibly partial) data follows.
-    pending.erase(0, bytesConsumed);
-
-    string resStr;
-    bool sendRdb = false;
-    string cmd, sub;
-
-    try {
-      RESPArray arr = get<RESPArray>(req.value);
-      if (!arr.empty()) {
-        cmd = get<string>(arr[0].value);
-        toUpper(cmd);
-
-        if(cmd == "REPLCONF" && arr.size() >= 2) {
-          sub = get<string>(arr[1].value);
-          toUpper(sub);
-        }
-
-        if (sendResponse)
-          sendRdb = (!config.isReplica && cmd == "PSYNC");
-      }
-
-      RESPValue res = handler.handle(req);
-
-      resStr = serializer.serialize(res);
-    } catch (const exception &e) {
-      resStr = "-" + string(e.what()) + "\r\n";
-    } catch (...) {
-      resStr = "-ERR unknown error\r\n";
-    }
-
-    bool shouldReply = sendResponse;
-
-    if(!sendResponse && cmd == "REPLCONF" && sub == "GETACK")
-      shouldReply = true;
-
-    if (sendResponse && cmd != "PSYNC" && replication.isReplicaConnection(sock_fd))
-      shouldReply = false;
-
-    if(shouldReply) {
-      send_msg(resStr, sock_fd);
-
-      if (sendRdb) {
-        string rdb = getEmptyRdb();
-        send_msg("$" + to_string(rdb.size()) + "\r\n", sock_fd);
-        send_msg(rdb, sock_fd);
-      }
-    } else if (!resStr.empty()) {
-      cout << "ERR while replicating : " << resStr << endl;
-    }
-
-    if(!sendResponse)
-      replication.addProcessedOffset(bytesConsumed);
-  }
-}
-
-// Reads whatever is available on sock_fd, appends it to `pending`, and then
-// hands off to consumeCommands() to parse/execute as many complete RESP
-// commands as are now buffered.
-//
-// Returns false when the connection has been closed / recv() failed, so the
-// caller knows to stop looping and clean up.
-bool processIncomingStream(int sock_fd,
-                            string &pending,
-                            RESPParser &parser,
-                            RequestHandler &handler,
-                            RESPSerializer &serializer,
-                            Config &config,
-                            ReplicationManager &replication,
-                            bool sendResponse) {
-  char buffer[MAX_BUFFER_LEN];
-
-  int msg_len = recv(sock_fd, buffer, sizeof(buffer), 0);
-  if (msg_len <= 0)
-    return false;
-
-  pending.append(buffer, msg_len);
-
-  consumeCommands(sock_fd, pending, parser, handler, serializer, config, replication, sendResponse);
-
-  return true;
-}
-
 // Right after PSYNC, the master replies with:
 //   1) "+FULLRESYNC <replid> <offset>\r\n"          (a normal simple string)
 //   2) "$<length>\r\n<raw rdb bytes>"                (NOT a normal bulk
@@ -183,7 +48,8 @@ bool processIncomingStream(int sock_fd,
 // This function strips both pieces directly out of `pending`, pulling more
 // bytes off the socket as needed, and leaves `pending` holding only
 // whatever (if anything) came after the RDB payload -- e.g. the start of
-// the first propagated command.
+// the first propagated command. Runs once, synchronously, as part of the
+// startup handshake -- ongoing traffic afterward is handled by EventLoop.
 bool consumeFullResyncAndRdb(int sock_fd, string &pending) {
   auto readMore = [&]() -> bool {
     char buf[MAX_BUFFER_LEN];
@@ -224,59 +90,6 @@ bool consumeFullResyncAndRdb(int sock_fd, string &pending) {
   pending.erase(0, rdbLen);
 
   return true;
-}
-
-
-void handleClient(int client_fd,
-                RESPParser &parser,
-                Store &store,
-                RESPSerializer &serializer,
-                ReplicationManager &replication,
-                AOFManager &aof,
-                Config &config) {
-  RequestHandler handler(store, serializer, config, replication, aof, client_fd);
-
-  string pending;
-  while (processIncomingStream(client_fd, pending, parser, handler, serializer, config, replication, /*sendResponse=*/true)) {
-    // keep looping while the connection stays open
-  }
-
-  replication.removeReplica(client_fd);
-
-  close(client_fd);
-}
-
-void receiveFromMaster(RESPParser &parser,
-                      Store &store,
-                      RESPSerializer &serializer,
-                      ReplicationManager &replication,
-                      Config &config,
-                      AOFManager &aof,
-                      string pending) {
-  RequestHandler handler(store, serializer, config, replication, aof, config.masterFd);
-
-  try {
-    if (!consumeFullResyncAndRdb(config.masterFd, pending)) {
-      cout << "Master closed connection while transferring RDB.\n";
-      close(config.masterFd);
-      return;
-    }
-  } catch (const exception &e) {
-    cout << "ERR consuming RDB from master: " << e.what() << endl;
-    close(config.masterFd);
-    return;
-  }
-
-  // Anything that arrived bundled right behind the RDB bytes in the same
-  // recv() (e.g. a propagated SET) is already sitting in `pending` -- handle
-  // it before going back to the socket for more.
-  consumeCommands(config.masterFd, pending, parser, handler, serializer, config, replication, /*sendResponse=*/false);
-
-  while (processIncomingStream(config.masterFd, pending, parser, handler, serializer, config, replication, /*sendResponse=*/false)) {
-    // keep looping while the connection stays open
-  }
-
-  close(config.masterFd);
 }
 
 bool connectToMaster(Config &config, RESPSerializer &serializer, string &pendingAfterHandshake) {
@@ -323,15 +136,14 @@ bool connectToMaster(Config &config, RESPSerializer &serializer, string &pending
   // step. After the PSYNC step this will hold the "+FULLRESYNC ...\r\n"
   // line and possibly the start of the RDB bytes too (since they can
   // arrive in the same recv()) -- we hand all of it off to
-  // receiveFromMaster() so nothing gets silently dropped.
+  // consumeFullResyncAndRdb() so nothing gets silently dropped.
   string lastReceived;
 
   auto sendAndReceive = [&](const RESPArray &cmd) {
     send_msg(serializer.serialize({cmd, '*'}), config.masterFd);
-    
+
     string received = receive_msg(config.masterFd);
     if (received.empty()) {
-      // cout << "Connection closed by master.\n";
       close(config.masterFd);
       config.masterFd = -1;
       return false;
@@ -340,7 +152,7 @@ bool connectToMaster(Config &config, RESPSerializer &serializer, string &pending
     return true;
   };
 
-  if (!sendAndReceive({ RESPValue("PING", '$')})) 
+  if (!sendAndReceive({ RESPValue("PING", '$')}))
     return false;
 
   // REPLCONF listening-port <port>
@@ -362,8 +174,8 @@ bool connectToMaster(Config &config, RESPSerializer &serializer, string &pending
     return false;
   // Continue with serializer / handshake...
 
-  // Hand off whatever came back with the PSYNC reply so receiveFromMaster
-  // can strip the FULLRESYNC line + RDB payload from it correctly.
+  // Hand off whatever came back with the PSYNC reply so the caller can
+  // strip the FULLRESYNC line + RDB payload from it correctly.
   pendingAfterHandshake = lastReceived;
 
   return true;
@@ -420,7 +232,6 @@ int main(int argc, char **argv)
   }
 
   RESPSerializer serializer;
-  RESPParser parser;
   Store store;
   ReplicationManager replication(serializer);
   RDBParser rdbParser;
@@ -437,15 +248,29 @@ int main(int argc, char **argv)
     rdbParser.load(rdbPath, store);
   }
 
+  // Replication handshake (PING/REPLCONF/PSYNC + FULLRESYNC/RDB transfer) is
+  // kept synchronous/blocking here, at startup, before the event loop exists.
+  // Everything after that -- propagated writes, REPLCONF GETACK/ACK -- runs
+  // through EventLoop::adoptMasterConnection() once the loop is up.
+  string masterPending;
   if(config.isReplica) {
-    string masterPending;
     if(!connectToMaster(config, serializer, masterPending)) {
       cerr << "Failed to connect to master\n";
       return 1;
     }
-    thread(receiveFromMaster, ref(parser), ref(store), ref(serializer), ref(replication), ref(config), ref(aof), masterPending).detach();
-  }
 
+    try {
+      if(!consumeFullResyncAndRdb(config.masterFd, masterPending)) {
+        cerr << "Master closed connection while transferring RDB.\n";
+        close(config.masterFd);
+        return 1;
+      }
+    } catch(const exception &e) {
+      cerr << "ERR consuming RDB from master: " << e.what() << endl;
+      close(config.masterFd);
+      return 1;
+    }
+  }
 
   int server_fd = socket(AF_INET, SOCK_STREAM, 0);
   if (server_fd < 0)
@@ -481,17 +306,17 @@ int main(int argc, char **argv)
     return 1;
   }
 
-  struct sockaddr_in client_addr;
-  socklen_t client_addr_len = sizeof(client_addr);
   std::cout << "Waiting for a client to connect...\n";
 
   // You can use print statements as follows for debugging, they'll be visible when running tests.
   std::cout << "Logs from your program will appear here!\n";
 
-  // Uncomment the code below to pass the first stage
-
   try {
     EventLoop loop(server_fd, store, serializer, replication, aof, config);
+
+    if(config.isReplica)
+      loop.adoptMasterConnection(config.masterFd, move(masterPending));
+
     loop.run();
   } catch(const exception &e) {
     cerr << "Event loop failed: " << e.what() << "\n";

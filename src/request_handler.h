@@ -54,6 +54,22 @@ private:
     RESPValue handleIncr(const RESPArray &arr);
     RESPValue handleExec();
 
+    RESPValue formatXreadResponse(const vector<pair<string, StreamType>> &streamResults);
+
+public:
+    // Non-blocking "attempt" entry points used by EventLoop for top-level
+    // BLPOP / XREAD BLOCK / WAIT so it can park the client instead of
+    // blocking this thread. nullopt means "no data/acks yet, please park".
+    optional<RESPValue> tryBlpop(const RESPArray &arr, string &outKey, double &outTimeoutSeconds);
+    optional<RESPValue> tryXreadBlock(const RESPArray &arr, vector<pair<string, string>> &outResolvedStreams, long long &outTimeoutMs);
+    optional<RESPValue> tryWait(const RESPArray &arr, int &outNumReplicas, long long &outTargetOffset, long long &outTimeoutMs);
+
+    // Called by EventLoop once a parked client's condition is satisfied.
+    RESPValue finalizeBlpop(const string &key, const string &value, const RESPArray &originalArr);
+    optional<RESPValue> resolveXread(const vector<pair<string, string>> &resolvedStreams);
+
+private:
+
     RESPValue handleWatch(const RESPArray &arr);
     RESPValue handleUnwatch(const RESPArray &arr);
 

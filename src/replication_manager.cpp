@@ -2,22 +2,20 @@
 #include "RESP/resp_serializer.h"
 #include "network_utils.h"
 
+#include <algorithm>
 #include <iostream>
-#include <chrono>
 
 using namespace std;
 
 ReplicationManager::ReplicationManager(RESPSerializer &serializer) : serializer(serializer){ }
 
 void ReplicationManager::addReplica(int clientFd) {
-    lock_guard<mutex> lock(replicaMtx);
     Replica replica;
     replica.clientFd = clientFd;
     replicaSockets.push_back(replica);
 }
 
 void ReplicationManager::removeReplica(int clientFd) {
-    lock_guard<mutex> lock(replicaMtx);
     replicaSockets.erase(
         remove_if(replicaSockets.begin(), replicaSockets.end(),
             [clientFd](const Replica &replica) {
@@ -31,50 +29,32 @@ void ReplicationManager::removeReplica(int clientFd) {
 void ReplicationManager::propagate(const RESPArray &arr) {
     const string bytes = serializer.serialize({arr, '*'});
 
-    vector<int> fds;
-    {
-        lock_guard<mutex> lock(replicaMtx);
-        masterOffset += bytes.size();
-        pendingWrites = true;
-        for(auto &replica : replicaSockets)
-            fds.push_back(replica.clientFd);
-    }
+    masterOffset += bytes.size();
+    pendingWrites = true;
 
-    for(auto &fd : fds) {
-        send_msg(bytes, fd);
-    }
+    for(auto &replica : replicaSockets)
+        send_msg(bytes, replica.clientFd);
 }
 
 void ReplicationManager::updateAcknowledgeOffset(int clientFd, long long offset) {
-    {
-        lock_guard<mutex> lock(replicaMtx);
-        for(auto &replica : replicaSockets) {
-            if(replica.clientFd == clientFd) {
-                replica.acknowledgedOffset = offset;
-                break;
-            }
+    for(auto &replica : replicaSockets) {
+        if(replica.clientFd == clientFd) {
+            replica.acknowledgedOffset = offset;
+            break;
         }
     }
-    ackCv.notify_all();
 }
 
-int ReplicationManager::waitForAcks(int numReplicas, long long timeoutMs) {
-    long long targetOffset;
-    vector<int> fds;
-    {
-        lock_guard<mutex> lock(replicaMtx);
-        if(!pendingWrites)
-            return (int)replicaSockets.size();
-        targetOffset = masterOffset;
-        pendingWrites = false;
-        for(auto &replica : replicaSockets)
-            fds.push_back(replica.clientFd);
-    }
+bool ReplicationManager::hasPendingWrites() const {
+    return pendingWrites;
+}
 
-    if(targetOffset == 0) {
-        lock_guard<mutex> lock(replicaMtx);
-        return (int)replicaSockets.size();
-    }
+long long ReplicationManager::requestAcks() {
+    long long targetOffset = masterOffset;
+    pendingWrites = false;
+
+    if(targetOffset == 0)
+        return targetOffset;
 
     RESPArray getack = {
         RESPValue{"REPLCONF", '$'},
@@ -83,35 +63,20 @@ int ReplicationManager::waitForAcks(int numReplicas, long long timeoutMs) {
     };
 
     const string bytes = serializer.serialize({getack, '*'});
+    masterOffset += bytes.size();
 
-    {
-        lock_guard<mutex> lock(replicaMtx);
-        masterOffset += bytes.size();
-    }
+    for(auto &replica : replicaSockets)
+        send_msg(bytes, replica.clientFd);
 
-    for(auto fd : fds)
-        send_msg(bytes, fd);
+    return targetOffset;
+}
 
-    auto countAcked = [&]() {
-        int count = 0;
-        for(auto &replica : replicaSockets)
-            if(replica.acknowledgedOffset >= targetOffset)
-                count++;
-        return count;
-    };
-
-    unique_lock<mutex> lock(replicaMtx);
-
-    auto deadline = chrono::steady_clock::now() + chrono::milliseconds(timeoutMs);
-
-    int acked = countAcked();
-
-    while(acked < numReplicas && chrono::steady_clock::now() < deadline) {
-        ackCv.wait_until(lock, deadline);
-        acked = countAcked();
-    }
-
-    return acked;
+int ReplicationManager::countAcked(long long targetOffset) {
+    int count = 0;
+    for(auto &replica : replicaSockets)
+        if(replica.acknowledgedOffset >= targetOffset)
+            count++;
+    return count;
 }
 
 long long ReplicationManager::getProcessedOffset() const {
@@ -123,7 +88,6 @@ void ReplicationManager::addProcessedOffset(long long bytes) {
 }
 
 long long ReplicationManager::getReplicaCount() {
-    lock_guard<mutex> lock(replicaMtx);
     return replicaSockets.size();
 }
 
@@ -131,9 +95,7 @@ long long ReplicationManager::getMasterOffset() const {
     return masterOffset;
 }
 
-
 bool ReplicationManager::isReplicaConnection(int fd) {
-    lock_guard<mutex> lock(replicaMtx);
     for(auto &replica : replicaSockets)
         if(replica.clientFd == fd)
             return true;
